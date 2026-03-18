@@ -1,6 +1,5 @@
-"use client";
 import { useState } from "react";
-import Image from "next/image";
+import { aiGenerateImage } from "@/lib/desktop-client";
 
 interface ImageGenPanelProps {
   onInsertImage: (imageSrc: string) => void;
@@ -23,18 +22,7 @@ export default function ImageGenPanel({ onInsertImage, contextText }: ImageGenPa
     setGeneratedImage(null);
 
     try {
-      const res = await fetch("/api/generate-image", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: finalPrompt }),
-      });
-
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || "Generation failed");
-      }
-
-      const { imageBase64, mimeType } = await res.json();
+      const { imageBase64, mimeType } = await aiGenerateImage(finalPrompt);
       const src = `data:${mimeType};base64,${imageBase64}`;
       setGeneratedImage(src);
     } catch (err) {
@@ -62,12 +50,7 @@ export default function ImageGenPanel({ onInsertImage, contextText }: ImageGenPa
     <div className="min-w-0 space-y-3 rounded-xl border border-white/10 bg-white/5 p-4">
       <div className="flex items-center justify-between">
         <h3 className="text-sm font-medium text-white">Generate Image</h3>
-        <button
-          onClick={() => setIsOpen(false)}
-          className="text-white/40 hover:text-white/60 text-lg"
-        >
-          x
-        </button>
+        <button onClick={() => setIsOpen(false)} className="text-white/40 hover:text-white/60 text-lg">x</button>
       </div>
 
       <textarea
@@ -90,14 +73,7 @@ export default function ImageGenPanel({ onInsertImage, contextText }: ImageGenPa
 
       {generatedImage && (
         <div className="space-y-2">
-          <Image
-            src={generatedImage}
-            alt="Generated"
-            width={1024}
-            height={1024}
-            unoptimized
-            className="w-full rounded-lg"
-          />
+          <img src={generatedImage} alt="Generated" className="w-full rounded-lg" />
           <button
             onClick={() => {
               onInsertImage(generatedImage);

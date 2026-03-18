@@ -88,6 +88,16 @@ export default function TranscriptPanel({
     return active?.id || null;
   }, [segments, currentTime]);
 
+  const activeWordId = useMemo(() => {
+    if (!activeSegmentId) return null;
+    const segment = segments.find((s) => s.id === activeSegmentId);
+    if (!segment) return null;
+    const word = segment.words.find(
+      (w) => w.aligned && currentTime >= w.startTime && currentTime < w.endTime
+    );
+    return word?.id || null;
+  }, [activeSegmentId, currentTime, segments]);
+
   const searchScoreMap = useMemo(() => {
     if (!searchResults) return null;
     const map = new Map<string, number>();
@@ -178,6 +188,12 @@ export default function TranscriptPanel({
   }, []);
 
   useEffect(() => {
+    if (!activeWordId || !transcriptTextRef.current) return;
+    const el = transcriptTextRef.current.querySelector(`[data-word-id="${activeWordId}"]`);
+    if (el) el.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [activeWordId]);
+
+  useEffect(() => {
     const handleSelectionChange = () => {
       if (suppressSelectionSyncRef.current) return;
       onSelectionChange(buildSelectionFromDom());
@@ -234,7 +250,7 @@ export default function TranscriptPanel({
         <div className="border-b border-white/8 px-4 py-3">
           <p className="text-[10px] uppercase tracking-[0.2em] text-white/28">Search Context</p>
           <p className="mt-1 text-xs leading-5 text-white/58">
-            Showing semantic matches for &quot;{activeSearchQuery}&quot;. Matching sections are highlighted below.
+            Showing transcript matches for &quot;{activeSearchQuery}&quot;. Matching sections are highlighted below.
           </p>
         </div>
       )}
@@ -365,10 +381,11 @@ export default function TranscriptPanel({
                 <div className="mt-2 text-sm leading-7 text-white/80">
                   {words.map((word, index) => {
                     const isSelected = selection?.wordIds.includes(word.wordId) ?? false;
+                    const isActiveWord = word.wordId === activeWordId;
                     return (
                       <span key={word.wordId}>
                         <span
-                          className="vibecut-word cursor-text px-[1px]"
+                          className={`vibecut-word cursor-text px-[1px] ${isActiveWord ? "bg-sky-400/25 rounded" : ""}`}
                           data-word-id={word.wordId}
                           data-source-clip-id={word.sourceClipId}
                           data-segment-id={word.segmentId}

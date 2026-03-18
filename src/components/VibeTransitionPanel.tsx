@@ -1,7 +1,5 @@
-"use client";
-
-import { useState, useRef } from "react";
-import Image from "next/image";
+import { useState } from "react";
+import { aiGenerateTransition, createPreviewUrl } from "@/lib/desktop-client";
 
 interface VibeTransitionPanelProps {
   onTransitionGenerated: (videoUri: string) => void;
@@ -18,7 +16,7 @@ export default function VibeTransitionPanel({ onTransitionGenerated, onCancel }:
   const captureFrame = (target: "a" | "b") => {
     const videoEl = document.getElementById("main-player-video") as HTMLVideoElement | null;
     const imageEl = document.getElementById("main-player-image") as HTMLImageElement | null;
-    
+
     let dataUrl = "";
     const canvas = document.createElement("canvas");
     const ctx = canvas.getContext("2d");
@@ -38,7 +36,7 @@ export default function VibeTransitionPanel({ onTransitionGenerated, onCancel }:
       setError("No active video or image found in player to capture.");
       return;
     }
-    
+
     if (target === "a") {
       setFrameA(dataUrl);
       setStep("capture-b");
@@ -56,24 +54,18 @@ export default function VibeTransitionPanel({ onTransitionGenerated, onCancel }:
     setError(null);
 
     try {
-      const response = await fetch("/api/vibe-text", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "transition",
-          lastFrameBase64: frameA,
-          startFrameBBase64: frameB || undefined,
-          imageMimeType: "image/png",
-          nextClipDescription: description || undefined
-        }),
-      });
+      const result = await aiGenerateTransition(
+        frameA,
+        frameB || undefined,
+        description || undefined
+      );
 
-      const data = await response.json();
-      if (data.error) throw new Error(data.error);
-
-      onTransitionGenerated(data.videoUri);
-    } catch (err: any) {
-      setError(err.message);
+      const previewUrl = createPreviewUrl(result.videoPath);
+      if (previewUrl) {
+        onTransitionGenerated(previewUrl);
+      }
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Transition generation failed");
       setStep("review");
     }
   };
@@ -111,7 +103,6 @@ export default function VibeTransitionPanel({ onTransitionGenerated, onCancel }:
             className="group relative w-full overflow-hidden rounded-xl bg-sky-600 px-4 py-4 text-sm font-semibold text-white shadow-lg shadow-sky-900/40 hover:bg-sky-500 transition-all active:scale-[0.98]"
           >
             <span className="relative z-10">Capture End of Clip A</span>
-            <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent -translate-x-full group-hover:translate-x-full transition-transform duration-1000" />
           </button>
         </div>
       )}
@@ -132,7 +123,6 @@ export default function VibeTransitionPanel({ onTransitionGenerated, onCancel }:
             className="group relative w-full overflow-hidden rounded-xl bg-purple-600 px-4 py-4 text-sm font-semibold text-white shadow-lg shadow-purple-900/40 hover:bg-purple-500 transition-all active:scale-[0.98]"
           >
             <span className="relative z-10">Capture Start of Clip B</span>
-            <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent -translate-x-full group-hover:translate-x-full transition-transform duration-1000" />
           </button>
           <button onClick={() => setStep("capture-a")} className="w-full text-[10px] uppercase tracking-widest text-white/30 hover:text-white/60 transition-colors">Reselect Clip A</button>
         </div>
@@ -144,17 +134,17 @@ export default function VibeTransitionPanel({ onTransitionGenerated, onCancel }:
             <div className="flex-1 space-y-2">
               <p className="text-[10px] uppercase tracking-widest text-white/40 text-center">Clip A End</p>
               <div className="aspect-video relative overflow-hidden rounded-lg bg-black/40 border border-white/5 ring-1 ring-white/10">
-                {frameA && <Image src={frameA} alt="Clip A" fill className="object-cover" unoptimized />}
+                {frameA && <img src={frameA} alt="Clip A" className="absolute inset-0 h-full w-full object-cover" />}
               </div>
             </div>
             <div className="flex-1 space-y-2">
               <p className="text-[10px] uppercase tracking-widest text-white/40 text-center">Clip B Start</p>
               <div className="aspect-video relative overflow-hidden rounded-lg bg-black/40 border border-white/5 ring-1 ring-white/10">
-                {frameB && <Image src={frameB} alt="Clip B" fill className="object-cover" unoptimized />}
+                {frameB && <img src={frameB} alt="Clip B" className="absolute inset-0 h-full w-full object-cover" />}
               </div>
             </div>
           </div>
-          
+
           <div>
             <div className="flex items-center justify-between mb-1.5">
               <label className="text-[10px] uppercase tracking-[0.2em] text-white/30 font-semibold">Evolution Prompt (Optional)</label>

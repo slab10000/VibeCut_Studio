@@ -3,37 +3,41 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "npm run dev:web",
-    "dev:web": "next dev --webpack",
-    "dev:sidecar": "python3 -m uvicorn sidecar.server:app --host 127.0.0.1 --port 8765",
+    "dev": "vite",
+    "dev:web": "vite",
+    "dev:sidecar": "bash ./scripts/run-sidecar.sh",
+    "dev:tauri": "tauri dev",
+    "dev:desktop": "concurrently -k -n TAURI,SIDECAR -c cyan,magenta \"npm run dev:tauri\" \"npm run dev:sidecar\"",
     "dev:local": "concurrently -k -n WEB,SIDECAR -c cyan,magenta \"npm run dev:web\" \"npm run dev:sidecar\"",
-    "build": "next build --webpack",
-    "start": "next start",
+    "build": "vite build",
+    "preview": "vite preview",
+    "tauri:build": "tauri build",
     "lint": "eslint",
-    "sidecar:install": "python3 -m pip install -r sidecar/requirements.txt",
-    "sidecar:health": "curl -fsS http://127.0.0.1:8765/health",
-    "sync:ffmpeg": "mkdir -p public/ffmpeg && cp node_modules/@ffmpeg/core/dist/esm/ffmpeg-core.js public/ffmpeg/ffmpeg-core.js && cp node_modules/@ffmpeg/core/dist/esm/ffmpeg-core.wasm public/ffmpeg/ffmpeg-core.wasm",
-    "postinstall": "npm run sync:ffmpeg"
+    "sidecar:install": "bash ./scripts/run-sidecar.sh --install-only",
+    "sidecar:health": "curl -fsS http://127.0.0.1:8765/health"
   },
   "dependencies": {
-    "@ffmpeg/core": "^0.12.10",
-    "@ffmpeg/ffmpeg": "^0.12.15",
-    "@ffmpeg/util": "^0.12.2",
-    "@google/genai": "^1.45.0",
-    "next": "16.1.6",
+    "@tanstack/react-query": "^5.90.21",
+    "@tauri-apps/api": "^2.8.0",
+    "@tauri-apps/plugin-dialog": "^2.4.0",
     "react": "19.2.3",
     "react-dom": "19.2.3",
-    "uuid": "^13.0.0"
+    "uuid": "^13.0.0",
+    "zustand": "^5.0.12"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
+    "@tauri-apps/cli": "^2.8.5",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@vitejs/plugin-react": "^5.1.0",
     "concurrently": "^9.1.2",
     "eslint": "^9",
-    "eslint-config-next": "16.1.6",
+    "eslint-config-next": "^16.1.6",
+    "next": "^16.1.6",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vite": "^7.1.7"
   }
 }

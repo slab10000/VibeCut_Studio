@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 
 APP_TITLE = "VibeCut Studio WhisperX Sidecar"
 AUDIO_SAMPLE_RATE = 16000
@@ -18,6 +18,12 @@ WHISPERX_MODEL = os.getenv("WHISPERX_MODEL", "large-v3")
 WHISPERX_DEVICE = os.getenv("WHISPERX_DEVICE", "cpu")
 WHISPERX_COMPUTE_TYPE = os.getenv("WHISPERX_COMPUTE_TYPE", "int8")
 WHISPERX_BATCH_SIZE = int(os.getenv("WHISPERX_BATCH_SIZE", "16"))
+# VAD (Voice Activity Detection) — filters out non-speech before transcription
+WHISPERX_VAD_ONSET = float(os.getenv("WHISPERX_VAD_ONSET", "0.500"))
+WHISPERX_VAD_OFFSET = float(os.getenv("WHISPERX_VAD_OFFSET", "0.363"))
+# Silence detection thresholds for pause detection
+SILENCE_NOISE_DB = os.getenv("SILENCE_NOISE_DB", "-35dB")
+SILENCE_MIN_DURATION = float(os.getenv("SILENCE_MIN_DURATION", "0.2"))
 
 app = FastAPI(title=APP_TITLE, version="0.1.0")
 
@@ -130,7 +136,7 @@ def detect_pause_ranges(audio_path: Path) -> list[dict[str, Any]]:
             "-i",
             str(audio_path),
             "-af",
-            "silencedetect=noise=-35dB:d=0.2",
+            f"silencedetect=noise={SILENCE_NOISE_DB}:d={SILENCE_MIN_DURATION}",
             "-f",
             "null",
             "-",
@@ -163,7 +169,7 @@ def detect_pause_ranges(audio_path: Path) -> list[dict[str, Any]]:
         start_time = pending_start if pending_start is not None else max(0.0, end_time - duration)
         pending_start = None
 
-        if duration < 0.2:
+        if duration < SILENCE_MIN_DURATION:
             continue
 
         pauses.append(
@@ -253,33 +259,65 @@ def health():
 
 
 @app.post("/transcribe")
-async def transcribe(video: UploadFile = File(...)):
+async def transcribe(
+    video: UploadFile | None = File(default=None),
+    source_path: str | None = Form(default=None),
+    display_name: str | None = Form(default=None),
+    language: str | None = Form(default=None),
+):
     require_binary("ffmpeg")
     require_binary("ffprobe")
     whisperx = require_whisperx()
 
-    suffix = Path(video.filename or "input.mp4").suffix or ".mp4"
+    source_media_path: Path | None = None
+    source_name = display_name or "input.mp4"
+
+    if source_path:
+        candidate = Path(source_path).expanduser()
+        if not candidate.exists() or not candidate.is_file():
+            raise HTTPException(status_code=422, detail="The requested source path does not exist.")
+        source_media_path = candidate
+        source_name = display_name or candidate.name
+    elif video is not None:
+        source_name = display_name or video.filename or "input.mp4"
+    else:
+        raise HTTPException(status_code=422, detail="Provide either an uploaded file or a local source path.")
+
+    suffix = Path(source_name).suffix or ".mp4"
 
     with tempfile.TemporaryDirectory(prefix="vibecut-whisperx-") as temp_dir:
         temp_dir_path = Path(temp_dir)
-        input_path = temp_dir_path / f"input{suffix}"
         audio_path = temp_dir_path / "audio.wav"
 
-        contents = await video.read()
-        input_path.write_bytes(contents)
+        if source_media_path is None:
+            input_path = temp_dir_path / f"input{suffix}"
+            contents = await video.read()
+            input_path.write_bytes(contents)
+            source_media_path = input_path
 
-        extract_audio(input_path, audio_path)
+        extract_audio(source_media_path, audio_path)
         pauses = detect_pause_ranges(audio_path)
 
         audio = whisperx.load_audio(str(audio_path))
         model = get_transcribe_model(whisperx)
-        transcription = model.transcribe(audio, batch_size=WHISPERX_BATCH_SIZE)
+
+        transcribe_kwargs: dict[str, Any] = {
+            "batch_size": WHISPERX_BATCH_SIZE,
+            "vad_options": {
+                "vad_onset": WHISPERX_VAD_ONSET,
+                "vad_offset": WHISPERX_VAD_OFFSET,
+            },
+        }
+        if language:
+            transcribe_kwargs["language"] = language
+
+        transcription = model.transcribe(audio, **transcribe_kwargs)
 
         transcription_segments = transcription.get("segments", [])
         aligned_segments = transcription_segments
         alignment_mode = "aligned"
 
-        language_code = transcription.get("language")
+        language_code = transcription.get("language") or language
         if language_code:
             try:
                 align_model, metadata = get_align_model(whisperx, language_code)
@@ -330,5 +368,7 @@ async def transcribe(video: UploadFile = File(...)):
                 "computeType": WHISPERX_COMPUTE_TYPE,
                 "language": language_code,
                 "alignmentMode": alignment_mode,
+                "vadOnset": WHISPERX_VAD_ONSET,
+                "vadOffset": WHISPERX_VAD_OFFSET,
             },
         }

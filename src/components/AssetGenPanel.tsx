@@ -1,22 +1,19 @@
-"use client";
 import { useState } from "react";
-import Image from "next/image";
+import { aiGenerateImage, aiGenerateVideo, createPreviewUrl } from "@/lib/desktop-client";
 
 interface AssetGenPanelProps {
   onInsertImage: (imageSrc: string) => void;
-  onAddFiles: (files: File[]) => void;
   contextText?: string;
 }
 
-export default function AssetGenPanel({ onInsertImage, onAddFiles, contextText }: AssetGenPanelProps) {
+export default function AssetGenPanel({ onInsertImage, contextText }: AssetGenPanelProps) {
   const [activeTab, setActiveTab] = useState<"image" | "video">("image");
   const [prompt, setPrompt] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
-  
+
   const [generatedImage, setGeneratedImage] = useState<string | null>(null);
-  const [generatedVideo, setGeneratedVideo] = useState<string | null>(null);
-  const [generatedVideoFile, setGeneratedVideoFile] = useState<File | null>(null);
-  
+  const [generatedVideoUrl, setGeneratedVideoUrl] = useState<string | null>(null);
+
   const [error, setError] = useState<string | null>(null);
   const [isOpen, setIsOpen] = useState(false);
 
@@ -27,46 +24,21 @@ export default function AssetGenPanel({ onInsertImage, onAddFiles, contextText }
     setIsGenerating(true);
     setError(null);
     setGeneratedImage(null);
-    setGeneratedVideo(null);
-    setGeneratedVideoFile(null);
+    setGeneratedVideoUrl(null);
 
     try {
       if (activeTab === "image") {
-        const res = await fetch("/api/generate-image", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ prompt: finalPrompt }),
-        });
-
-        if (!res.ok) {
-          const data = await res.json();
-          throw new Error(data.error || "Image generation failed");
-        }
-
-        const { imageBase64, mimeType } = await res.json();
+        const { imageBase64, mimeType } = await aiGenerateImage(finalPrompt);
         const src = `data:${mimeType};base64,${imageBase64}`;
         setGeneratedImage(src);
       } else {
-        const res = await fetch("/api/generate-video", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ prompt: finalPrompt }),
-        });
+        // For video generation, we first need a base image
+        const imgResult = await aiGenerateImage(finalPrompt);
+        const imgSrc = `data:${imgResult.mimeType};base64,${imgResult.imageBase64}`;
 
-        if (!res.ok) {
-          const data = await res.json();
-          throw new Error(data.error || "Video generation failed");
-        }
-
-        const { videoBase64, mimeType } = await res.json();
-        const src = `data:${mimeType};base64,${videoBase64}`;
-        setGeneratedVideo(src);
-        
-        // Convert base64 to File
-        const fetchRes = await fetch(src);
-        const blob = await fetchRes.blob();
-        const file = new File([blob], `AI_Video_${Date.now()}.mp4`, { type: mimeType });
-        setGeneratedVideoFile(file);
+        const videoResult = await aiGenerateVideo(finalPrompt, imgSrc, imgResult.mimeType);
+        const videoUrl = createPreviewUrl(videoResult.videoPath);
+        setGeneratedVideoUrl(videoUrl);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Generation failed");
@@ -93,12 +65,7 @@ export default function AssetGenPanel({ onInsertImage, onAddFiles, contextText }
     <div className="min-w-0 space-y-3 rounded-xl border border-white/10 bg-white/5 p-4">
       <div className="flex items-center justify-between">
         <h3 className="text-sm font-medium text-white">Generate Media</h3>
-        <button
-          onClick={() => setIsOpen(false)}
-          className="text-white/40 hover:text-white/60 text-lg"
-        >
-          x
-        </button>
+        <button onClick={() => setIsOpen(false)} className="text-white/40 hover:text-white/60 text-lg">x</button>
       </div>
 
       <div className="flex gap-2 rounded-lg bg-white/5 p-1">
@@ -140,14 +107,7 @@ export default function AssetGenPanel({ onInsertImage, onAddFiles, contextText }
 
       {generatedImage && activeTab === "image" && (
         <div className="space-y-2">
-          <Image
-            src={generatedImage}
-            alt="Generated Image"
-            width={1024}
-            height={1024}
-            unoptimized
-            className="w-full rounded-lg"
-          />
+          <img src={generatedImage} alt="Generated Image" className="w-full rounded-lg" />
           <button
             onClick={() => {
               onInsertImage(generatedImage);
@@ -161,28 +121,10 @@ export default function AssetGenPanel({ onInsertImage, onAddFiles, contextText }
         </div>
       )}
 
-      {generatedVideo && activeTab === "video" && (
+      {generatedVideoUrl && activeTab === "video" && (
         <div className="space-y-2">
-          <video
-            src={generatedVideo}
-            autoPlay
-            loop
-            muted
-            className="w-full rounded-lg bg-black"
-          />
-          <button
-            onClick={() => {
-              if (generatedVideoFile) {
-                onAddFiles([generatedVideoFile]);
-                setGeneratedVideo(null);
-                setGeneratedVideoFile(null);
-                setPrompt("");
-              }
-            }}
-            className="w-full px-4 py-2 bg-violet-600 hover:bg-violet-500 text-white text-sm font-medium rounded-lg transition-colors"
-          >
-            Add to Library
-          </button>
+          <video src={generatedVideoUrl} autoPlay loop muted className="w-full rounded-lg bg-black" />
+          <p className="text-xs text-white/40">Video saved to cache. Import via Media Bin to use in timeline.</p>
         </div>
       )}
     </div>

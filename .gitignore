@@ -19,6 +19,7 @@
 
 # production
 /build
+/dist
 
 # misc
 .DS_Store
@@ -39,3 +40,10 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# tauri / rust
+/src-tauri/target
+
+# local sidecar runtime
+/.venv-sidecar
+sidecar/__pycache__/

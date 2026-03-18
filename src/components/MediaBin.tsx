@@ -1,12 +1,12 @@
 "use client";
-import { useCallback, useMemo, useState } from "react";
+import { useMemo } from "react";
 import { LibraryClip } from "@/types";
 
 interface MediaBinProps {
   clips: LibraryClip[];
   selectedClipId: string | null;
   onSelectClip: (clipId: string) => void;
-  onAddFiles: (files: File[]) => void;
+  onImportRequest: () => void;
   searchDraft: string;
   activeSearchQuery: string;
   searchScores: Map<string, number>;
@@ -39,7 +39,7 @@ export default function MediaBin({
   clips,
   selectedClipId,
   onSelectClip,
-  onAddFiles,
+  onImportRequest,
   searchDraft,
   activeSearchQuery,
   searchScores,
@@ -48,16 +48,7 @@ export default function MediaBin({
   onSearchSubmit,
   onClearSearch,
 }: MediaBinProps) {
-  const [isDragging, setIsDragging] = useState(false);
   const hasActiveSearch = activeSearchQuery.trim().length > 0;
-
-  const handleFiles = useCallback(
-    (files: FileList | File[]) => {
-      const videos = Array.from(files).filter((file) => file.type.startsWith("video/"));
-      if (videos.length > 0) onAddFiles(videos);
-    },
-    [onAddFiles]
-  );
 
   const orderedClips = useMemo(() => {
     if (!hasActiveSearch) return clips;
@@ -77,41 +68,19 @@ export default function MediaBin({
           <p className="text-[10px] uppercase tracking-[0.22em] text-white/35">Project</p>
           <h2 className="mt-1 text-sm font-medium text-white/90">Media Bin</h2>
         </div>
-        <label className="inline-flex shrink-0 cursor-pointer items-center rounded-md border border-white/10 bg-white/6 px-2.5 py-1.5 text-[11px] font-medium text-white/80 transition hover:bg-white/10">
+        <button
+          type="button"
+          onClick={onImportRequest}
+          className="inline-flex shrink-0 cursor-pointer items-center rounded-md border border-white/10 bg-white/6 px-2.5 py-1.5 text-[11px] font-medium text-white/80 transition hover:bg-white/10"
+        >
           Import
-          <input
-            type="file"
-            accept="video/*"
-            multiple
-            className="hidden"
-            onChange={(event) => {
-              if (event.target.files) handleFiles(event.target.files);
-              event.target.value = "";
-            }}
-          />
-        </label>
+        </button>
       </div>
 
-      <div
-        className={`mx-3 mt-3 rounded-xl border px-3 py-4 transition ${
-          isDragging
-            ? "border-sky-400/60 bg-sky-400/8"
-            : "border-white/8 bg-white/[0.03]"
-        }`}
-        onDragOver={(event) => {
-          event.preventDefault();
-          setIsDragging(true);
-        }}
-        onDragLeave={() => setIsDragging(false)}
-        onDrop={(event) => {
-          event.preventDefault();
-          setIsDragging(false);
-          handleFiles(event.dataTransfer.files);
-        }}
-      >
+      <div className="mx-3 mt-3 rounded-xl border border-white/8 bg-white/[0.03] px-3 py-4 transition">
         <p className="text-xs font-medium text-white/88">Drop clips here</p>
         <p className="mt-1 text-[11px] leading-5 text-white/40">
-          Upload multiple files and drag ready clips into the timeline.
+          Import multiple files from disk and drag ready clips into the timeline.
         </p>
       </div>
 
@@ -120,7 +89,7 @@ export default function MediaBin({
           <div className="flex min-w-0 flex-wrap gap-2">
             <input
               type="text"
-              placeholder="Search uploaded videos..."
+              placeholder="Search transcript text..."
               value={searchDraft}
               onChange={(event) => onSearchDraftChange(event.target.value)}
               onKeyDown={(event) => event.key === "Enter" && onSearchSubmit()}
@@ -143,10 +112,10 @@ export default function MediaBin({
             )}
           </div>
           <div className="mt-2 flex flex-wrap items-center justify-between gap-1.5 text-[10px] uppercase tracking-[0.18em] text-white/32">
-            <span className="min-w-0 truncate">
-              {hasActiveSearch ? `Results for "${activeSearchQuery}"` : "Semantic clip search"}
-            </span>
-            <span className="shrink-0">{hasActiveSearch ? `${searchScores.size} ranked clips` : "Search by speech meaning"}</span>
+              <span className="min-w-0 truncate">
+                {hasActiveSearch ? `Results for "${activeSearchQuery}"` : "Transcript search"}
+              </span>
+              <span className="shrink-0">{hasActiveSearch ? `${searchScores.size} ranked clips` : "Search by spoken text"}</span>
           </div>
         </div>
 
@@ -188,7 +157,7 @@ export default function MediaBin({
                     <div className="flex gap-3">
                       <div className="h-14 w-20 shrink-0 overflow-hidden rounded-lg bg-black/50">
                         <video
-                          src={clip.objectUrl}
+                          src={clip.previewUrl || undefined}
                           muted
                           preload="metadata"
                           className="h-full w-full object-cover opacity-85"
