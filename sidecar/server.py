@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import concurrent.futures
+import inspect
 import importlib.util
 import os
 import shutil
@@ -18,9 +20,20 @@ WHISPERX_MODEL = os.getenv("WHISPERX_MODEL", "large-v3")
 WHISPERX_DEVICE = os.getenv("WHISPERX_DEVICE", "cpu")
 WHISPERX_COMPUTE_TYPE = os.getenv("WHISPERX_COMPUTE_TYPE", "int8")
 WHISPERX_BATCH_SIZE = int(os.getenv("WHISPERX_BATCH_SIZE", "16"))
-# VAD (Voice Activity Detection) — filters out non-speech before transcription
-WHISPERX_VAD_ONSET = float(os.getenv("WHISPERX_VAD_ONSET", "0.500"))
-WHISPERX_VAD_OFFSET = float(os.getenv("WHISPERX_VAD_OFFSET", "0.363"))
+# VAD (Voice Activity Detection) — filters out non-speech before transcription.
+# Lower values = less aggressive filtering (0.3/0.2 works better for varied audio).
+WHISPERX_VAD_ONSET = float(os.getenv("WHISPERX_VAD_ONSET", "0.300"))
+WHISPERX_VAD_OFFSET = float(os.getenv("WHISPERX_VAD_OFFSET", "0.200"))
+# Minimum language detection confidence to flag low-confidence auto-detection
+# in the response metadata. We still attempt alignment and fall back only if
+# the aligner actually fails.
+WHISPERX_LANG_CONFIDENCE_MIN = float(os.getenv("WHISPERX_LANG_CONFIDENCE_MIN", "0.50"))
+# Parallel chunked transcription settings.
+# Chunk boundaries can hurt exact word timing, so chunking is opt-in and
+# disabled by default in favor of whole-file transcription accuracy.
+WHISPERX_CHUNK_DURATION = float(os.getenv("WHISPERX_CHUNK_DURATION", "0"))
+WHISPERX_CHUNK_OVERLAP = float(os.getenv("WHISPERX_CHUNK_OVERLAP", "3"))
+WHISPERX_CHUNK_WORKERS = int(os.getenv("WHISPERX_CHUNK_WORKERS", "4"))
 # Silence detection thresholds for pause detection
 SILENCE_NOISE_DB = os.getenv("SILENCE_NOISE_DB", "-35dB")
 SILENCE_MIN_DURATION = float(os.getenv("SILENCE_MIN_DURATION", "0.2"))
@@ -66,18 +79,43 @@ def parse_float(value: Any) -> float | None:
     return parsed if parsed == parsed else None
 
 
+def filter_supported_kwargs(callable_obj: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
+    try:
+        parameters = inspect.signature(callable_obj).parameters.values()
+    except (TypeError, ValueError):
+        return kwargs
+
+    if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters):
+        return kwargs
+
+    supported_names = {parameter.name for parameter in parameters}
+    return {key: value for key, value in kwargs.items() if key in supported_names}
+
+
 def get_transcribe_model(whisperx_module):
-    cache_key = (WHISPERX_MODEL, WHISPERX_DEVICE, WHISPERX_COMPUTE_TYPE)
+    cache_key = (
+        WHISPERX_MODEL,
+        WHISPERX_DEVICE,
+        WHISPERX_COMPUTE_TYPE,
+        WHISPERX_VAD_ONSET,
+        WHISPERX_VAD_OFFSET,
+    )
 
     with _model_lock:
         if _transcribe_model["key"] == cache_key and _transcribe_model["value"] is not None:
             return _transcribe_model["value"]
 
-        model = whisperx_module.load_model(
-            WHISPERX_MODEL,
-            WHISPERX_DEVICE,
-            compute_type=WHISPERX_COMPUTE_TYPE,
+        load_kwargs = filter_supported_kwargs(
+            whisperx_module.load_model,
+            {
+                "compute_type": WHISPERX_COMPUTE_TYPE,
+                "vad_options": {
+                    "vad_onset": WHISPERX_VAD_ONSET,
+                    "vad_offset": WHISPERX_VAD_OFFSET,
+                },
+            },
         )
+        model = whisperx_module.load_model(WHISPERX_MODEL, WHISPERX_DEVICE, **load_kwargs)
         _transcribe_model["key"] = cache_key
         _transcribe_model["value"] = model
         return model
@@ -92,6 +130,99 @@ def get_align_model(whisperx_module, language_code: str):
         model, metadata = whisperx_module.load_align_model(language_code=language_code, device=WHISPERX_DEVICE)
         _align_models[cache_key] = (model, metadata)
         return model, metadata
+
+
+def _transcribe_chunk(
+    model,
+    chunk_audio,
+    chunk_offset: float,
+    transcribe_kwargs: dict[str, Any],
+) -> tuple[list[dict[str, Any]], str | None, float]:
+    """Transcribe one audio chunk and shift all timestamps by chunk_offset."""
+    result = model.transcribe(chunk_audio, **filter_supported_kwargs(model.transcribe, transcribe_kwargs))
+    segments: list[dict[str, Any]] = []
+    for seg in result.get("segments", []):
+        shifted = dict(seg)
+        shifted["start"] = (seg.get("start") or 0.0) + chunk_offset
+        shifted["end"] = (seg.get("end") or 0.0) + chunk_offset
+        shifted_words = []
+        for w in seg.get("words", []):
+            sw = dict(w)
+            if sw.get("start") is not None:
+                sw["start"] = sw["start"] + chunk_offset
+            if sw.get("end") is not None:
+                sw["end"] = sw["end"] + chunk_offset
+            shifted_words.append(sw)
+        shifted["words"] = shifted_words
+        segments.append(shifted)
+    lang = result.get("language")
+    confidence = parse_float(result.get("language_probability")) or 0.0
+    return segments, lang, confidence
+
+
+def transcribe_parallel(
+    model,
+    audio,
+    transcribe_kwargs: dict[str, Any],
+) -> tuple[list[dict[str, Any]], str | None, float]:
+    """Transcribe whole audio by default, or split into chunks when explicitly enabled."""
+    if WHISPERX_CHUNK_DURATION <= 0 or WHISPERX_CHUNK_WORKERS <= 1:
+        return _transcribe_chunk(model, audio, 0.0, transcribe_kwargs)
+
+    chunk_samples = int(WHISPERX_CHUNK_DURATION * AUDIO_SAMPLE_RATE)
+    if chunk_samples <= 0:
+        return _transcribe_chunk(model, audio, 0.0, transcribe_kwargs)
+
+    overlap_samples = max(0, int(WHISPERX_CHUNK_OVERLAP * AUDIO_SAMPLE_RATE))
+    total_samples = len(audio)
+
+    if total_samples <= chunk_samples:
+        return _transcribe_chunk(model, audio, 0.0, transcribe_kwargs)
+
+    # Build chunk slices: (audio_slice, offset_in_seconds)
+    chunks: list[tuple[Any, float]] = []
+    pos = 0
+    while pos < total_samples:
+        end = min(pos + chunk_samples + overlap_samples, total_samples)
+        chunks.append((audio[pos:end], pos / AUDIO_SAMPLE_RATE))
+        pos += chunk_samples
+        if end >= total_samples:
+            break
+
+    if len(chunks) == 1:
+        segs, lang, conf = _transcribe_chunk(model, audio, 0.0, transcribe_kwargs)
+        return segs, lang, conf
+
+    workers = min(WHISPERX_CHUNK_WORKERS, len(chunks))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [
+            pool.submit(_transcribe_chunk, model, chunk_audio, offset, transcribe_kwargs)
+            for chunk_audio, offset in chunks
+        ]
+        results = [f.result() for f in futures]
+
+    # Merge: each chunk "owns" segments starting before the next chunk's non-overlapping start.
+    merged_segments: list[dict[str, Any]] = []
+    best_lang: str | None = None
+    best_conf = 0.0
+
+    for i, (chunk_segs, lang, conf) in enumerate(results):
+        # Authority boundary: segments that start before the next chunk begins (non-overlap).
+        next_chunk_start = chunks[i + 1][1] if i + 1 < len(chunks) else float("inf")
+
+        for seg in chunk_segs:
+            seg_start = seg.get("start") or 0.0
+            if seg_start < next_chunk_start:
+                merged_segments.append(seg)
+
+        if conf > best_conf:
+            best_conf = conf
+            best_lang = lang
+
+    # Sort by start time in case chunks arrived out of order.
+    merged_segments.sort(key=lambda s: s.get("start") or 0.0)
+
+    return merged_segments, best_lang, best_conf
 
 
 def extract_audio(input_path: Path, output_path: Path) -> None:
@@ -224,6 +355,7 @@ def build_segment_payloads(segments: list[dict[str, Any]]) -> list[dict[str, Any
             )
             if normalized_word
         ]
+        words.sort(key=lambda word: (word["startTime"], word["endTime"]))
 
         normalized_segments.append(
             {
@@ -303,22 +435,21 @@ async def transcribe(
 
         transcribe_kwargs: dict[str, Any] = {
             "batch_size": WHISPERX_BATCH_SIZE,
-            "vad_options": {
-                "vad_onset": WHISPERX_VAD_ONSET,
-                "vad_offset": WHISPERX_VAD_OFFSET,
-            },
         }
         if language:
             transcribe_kwargs["language"] = language
 
-        transcription = model.transcribe(audio, **transcribe_kwargs)
+        transcription_segments, detected_language, lang_confidence = transcribe_parallel(
+            model, audio, transcribe_kwargs
+        )
 
-        transcription_segments = transcription.get("segments", [])
         aligned_segments = transcription_segments
         alignment_mode = "aligned"
 
-        language_code = transcription.get("language") or language
-        if language_code:
+        language_code = detected_language or language
+        alignment_eligible = bool(language_code and transcription_segments)
+
+        if alignment_eligible:
             try:
                 align_model, metadata = get_align_model(whisperx, language_code)
                 aligned = whisperx.align(
@@ -353,10 +484,19 @@ async def transcribe(
                 for segment in transcription_segments
             ]
 
+        if not language and language_code and lang_confidence < WHISPERX_LANG_CONFIDENCE_MIN:
+            alignment_mode = f"{alignment_mode}-low-confidence-language"
+
         segments = build_segment_payloads(aligned_segments)
 
         if not segments:
-            raise HTTPException(status_code=422, detail="WhisperX did not return any valid transcript segments.")
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "No speech was detected in this clip. "
+                    "Check that the video has audible dialogue and is not silent."
+                ),
+            )
 
         return {
             "segments": segments,
@@ -367,6 +507,7 @@ async def transcribe(
                 "device": WHISPERX_DEVICE,
                 "computeType": WHISPERX_COMPUTE_TYPE,
                 "language": language_code,
+                "languageConfidence": lang_confidence,
                 "alignmentMode": alignment_mode,
                 "vadOnset": WHISPERX_VAD_ONSET,
                 "vadOffset": WHISPERX_VAD_OFFSET,

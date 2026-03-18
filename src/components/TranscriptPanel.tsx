@@ -7,9 +7,12 @@ interface TranscriptPanelProps {
   segments: TranscriptSegment[];
   pauses: PauseRange[];
   currentTime: number;
+  canRetranscribe?: boolean;
+  isRetranscribing?: boolean;
   selection: TranscriptSelection | null;
   activeRange?: { startTime: number; endTime: number } | null;
   onSeek: (time: number) => void;
+  onRetranscribe?: () => void;
   onSelectionChange: (selection: TranscriptSelection | null) => void;
   onRemoveSelection: () => void;
   onRemoveSegment: (segmentId: string) => void;
@@ -69,9 +72,12 @@ export default function TranscriptPanel({
   segments,
   pauses,
   currentTime,
+  canRetranscribe,
+  isRetranscribing,
   selection,
   activeRange,
   onSeek,
+  onRetranscribe,
   onSelectionChange,
   onRemoveSelection,
   onRemoveSegment,
@@ -92,10 +98,14 @@ export default function TranscriptPanel({
     if (!activeSegmentId) return null;
     const segment = segments.find((s) => s.id === activeSegmentId);
     if (!segment) return null;
-    const word = segment.words.find(
-      (w) => w.aligned && currentTime >= w.startTime && currentTime < w.endTime
-    );
-    return word?.id || null;
+    const alignedWords = segment.words.filter((w) => w.aligned && Number.isFinite(w.startTime));
+    if (alignedWords.length === 0) return null;
+    // Exact match first
+    const exact = alignedWords.find((w) => currentTime >= w.startTime && currentTime < w.endTime);
+    if (exact) return exact.id;
+    // Between words: return the most recently passed word so the highlight doesn't vanish
+    const passed = alignedWords.filter((w) => w.startTime <= currentTime);
+    return passed.length > 0 ? passed[passed.length - 1].id : alignedWords[0].id;
   }, [activeSegmentId, currentTime, segments]);
 
   const searchScoreMap = useMemo(() => {
@@ -242,8 +252,20 @@ export default function TranscriptPanel({
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
       <div className="border-b border-white/8 px-4 py-3">
-        <p className="text-[10px] uppercase tracking-[0.22em] text-white/32">Transcript</p>
-        <p className="mt-1 truncate text-sm text-white/82">{clipName || "Select a clip"}</p>
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-[10px] uppercase tracking-[0.22em] text-white/32">Transcript</p>
+            <p className="mt-1 truncate text-sm text-white/82">{clipName || "Select a clip"}</p>
+          </div>
+          <button
+            type="button"
+            onClick={onRetranscribe}
+            disabled={!canRetranscribe || isRetranscribing}
+            className="shrink-0 rounded-md border border-sky-400/20 bg-sky-400/10 px-2.5 py-1.5 text-[11px] font-medium text-sky-100 transition hover:bg-sky-400/16 disabled:cursor-not-allowed disabled:opacity-35"
+          >
+            {isRetranscribing ? "Transcribing..." : "Re-Transcribe"}
+          </button>
+        </div>
       </div>
 
       {activeSearchQuery && (
@@ -282,7 +304,7 @@ export default function TranscriptPanel({
 
         {!selection && hasBatchOnlyRegions && (
           <p className="mt-2 text-[11px] leading-5 text-white/34">
-            Some regions do not have aligned word timing yet and can only be removed by segment.
+            Some regions do not have aligned word timing yet and can only be removed by segment. Re-transcribe the clip to refresh exact word alignment.
           </p>
         )}
       </div>
@@ -385,7 +407,13 @@ export default function TranscriptPanel({
                     return (
                       <span key={word.wordId}>
                         <span
-                          className={`vibecut-word cursor-text px-[1px] ${isActiveWord ? "bg-sky-400/25 rounded" : ""}`}
+                          className={`vibecut-word cursor-text rounded px-[1px] ${
+                            isActiveWord
+                              ? "bg-sky-400/30"
+                              : isSelected
+                              ? "bg-violet-400/30"
+                              : ""
+                          }`}
                           data-word-id={word.wordId}
                           data-source-clip-id={word.sourceClipId}
                           data-segment-id={word.segmentId}

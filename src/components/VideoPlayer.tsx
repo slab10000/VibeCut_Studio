@@ -1,5 +1,5 @@
 "use client";
-import { RefObject, useState, useRef, useEffect } from "react";
+import { RefObject, useState, useRef } from "react";
 
 interface VideoPlayerProps {
   videoUrl?: string | null;
@@ -47,26 +47,10 @@ export default function VideoPlayer({
   const containerRef = useRef<HTMLDivElement>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
-  useEffect(() => {
-    const handleFullscreenChange = () => {
-      setIsFullscreen(!!document.fullscreenElement);
-    };
-    document.addEventListener("fullscreenchange", handleFullscreenChange);
-    return () => document.removeEventListener("fullscreenchange", handleFullscreenChange);
-  }, []);
-
-  const toggleFullscreen = () => {
-    if (!document.fullscreenElement) {
-      containerRef.current?.requestFullscreen().catch((err) => {
-        console.error(`Error attempting to enable fullscreen: ${err.message}`);
-      });
-    } else {
-      document.exitFullscreen();
-    }
-  };
+  const toggleFullscreen = () => setIsFullscreen((prev) => !prev);
 
   return (
-    <div ref={containerRef} className="flex flex-1 h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-2xl border border-white/8 bg-[#111215]">
+    <div ref={containerRef} className={`flex flex-1 h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-2xl border border-white/8 bg-[#111215]${isFullscreen ? " fixed inset-0 z-[100] rounded-none border-0" : ""}`}>
       <div className="flex min-w-0 items-center justify-between gap-3 border-b border-white/8 px-4 py-3">
         <div className="min-w-0 flex-1">
           <p className="text-[10px] uppercase tracking-[0.22em] text-white/32">{title}</p>

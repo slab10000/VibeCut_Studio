@@ -142,7 +142,13 @@ export interface TimelineRange {
 }
 
 export type TimelineAction =
-  | { type: "ADD_SOURCE_CLIP"; sourceClipId: string; duration: number; label?: string }
+  | {
+      type: "ADD_SOURCE_CLIP";
+      sourceClipId: string;
+      duration: number;
+      label?: string;
+      pendingSourceDuration?: boolean;
+    }
   | { type: "REMOVE_SEGMENTS"; segments: TranscriptSegment[] }
   | { type: "REMOVE_RANGES"; ranges: TimelineRange[] }
   | { type: "INSERT_IMAGE"; afterClipId: string | null; imageSrc: string; duration: number; label?: string }

@@ -153,6 +153,21 @@ impl Database {
         &self.db_path
     }
 
+    pub fn reset_session_state(&self) -> anyhow::Result<()> {
+        let mut connection = self.connection()?;
+        let tx = connection.transaction()?;
+
+        tx.execute("DELETE FROM transcript_words", [])?;
+        tx.execute("DELETE FROM transcript_segments", [])?;
+        tx.execute("DELETE FROM pause_ranges", [])?;
+        tx.execute("DELETE FROM sequence_items", [])?;
+        tx.execute("DELETE FROM media_assets", [])?;
+        tx.execute("DELETE FROM jobs", [])?;
+
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn load_project_summary(&self) -> anyhow::Result<ProjectSummary> {
         let connection = self.connection()?;
         connection
@@ -398,6 +413,30 @@ impl Database {
 
         tx.commit()?;
         Ok(())
+    }
+
+    pub fn remove_media_asset(&self, project_id: &str, asset_id: &str) -> anyhow::Result<bool> {
+        let mut connection = self.connection()?;
+        let tx = connection.transaction()?;
+
+        let removed = tx.execute(
+            "DELETE FROM media_assets WHERE project_id = ?1 AND id = ?2",
+            params![project_id, asset_id],
+        )? > 0;
+
+        if removed {
+            tx.execute("DELETE FROM transcript_words WHERE source_clip_id = ?1", params![asset_id])?;
+            tx.execute("DELETE FROM transcript_segments WHERE source_clip_id = ?1", params![asset_id])?;
+            tx.execute("DELETE FROM pause_ranges WHERE source_clip_id = ?1", params![asset_id])?;
+            tx.execute(
+                "DELETE FROM sequence_items
+                 WHERE project_id = ?1 AND (source_clip_id = ?2 OR media_id = ?2)",
+                params![project_id, asset_id],
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(removed)
     }
 
     pub fn replace_sequence_items(&self, project_id: &str, items: &[SequenceItem]) -> anyhow::Result<()> {

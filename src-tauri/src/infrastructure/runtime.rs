@@ -1,6 +1,6 @@
 use std::{
     fs,
-    path::Path,
+    path::{Path, PathBuf},
     process::Command,
     time::UNIX_EPOCH,
 };
@@ -36,6 +36,37 @@ pub fn detect_hardware_encoding() -> Vec<String> {
     }
 
     encoders
+}
+
+pub fn normalize_media_path(input: &str) -> anyhow::Result<PathBuf> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("media path is empty"));
+    }
+
+    let path = if trimmed.starts_with("file://") {
+        let url = reqwest::Url::parse(trimmed).with_context(|| format!("invalid file URL: {trimmed}"))?;
+        url.to_file_path()
+            .map_err(|_| anyhow!("unable to convert file URL to a local path: {trimmed}"))?
+    } else {
+        PathBuf::from(trimmed)
+    };
+
+    let resolved = if path.exists() {
+        path
+    } else {
+        std::fs::canonicalize(&path).unwrap_or(path)
+    };
+
+    if !resolved.exists() {
+        return Err(anyhow!("media file was not found: {}", resolved.display()));
+    }
+
+    if !resolved.is_file() {
+        return Err(anyhow!("media path is not a file: {}", resolved.display()));
+    }
+
+    Ok(resolved)
 }
 
 pub fn now_fingerprint(path: &Path) -> anyhow::Result<String> {
@@ -103,6 +134,8 @@ pub fn generate_thumbnail(cache_dir: &Path, path: &Path, asset_id: &str) -> Opti
             "-vf",
             "thumbnail,scale=480:-2",
             "-frames:v",
+            "1",
+            "-update",
             "1",
             &output_path.to_string_lossy(),
         ])

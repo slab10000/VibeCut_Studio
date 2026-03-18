@@ -1,5 +1,5 @@
 "use client";
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { LibraryClip } from "@/types";
 
 interface MediaBinProps {
@@ -48,6 +48,12 @@ export default function MediaBin({
   onSearchSubmit,
   onClearSearch,
 }: MediaBinProps) {
+  const pointerDragRef = useRef<{
+    clipId: string;
+    startX: number;
+    startY: number;
+    dragging: boolean;
+  } | null>(null);
   const hasActiveSearch = activeSearchQuery.trim().length > 0;
 
   const orderedClips = useMemo(() => {
@@ -60,6 +66,49 @@ export default function MediaBin({
       return (originalIndexes.get(left.id) ?? 0) - (originalIndexes.get(right.id) ?? 0);
     });
   }, [clips, hasActiveSearch, searchScores]);
+
+  useEffect(() => {
+    const handleWindowMouseMove = (event: MouseEvent) => {
+      const pendingDrag = pointerDragRef.current;
+      if (!pendingDrag) return;
+
+      const distance = Math.hypot(event.clientX - pendingDrag.startX, event.clientY - pendingDrag.startY);
+      if (distance < 6) return;
+
+      if (!pendingDrag.dragging) {
+        pendingDrag.dragging = true;
+        document.body.style.userSelect = "none";
+      }
+    };
+
+    const handleWindowMouseUp = (event: MouseEvent) => {
+      const pendingDrag = pointerDragRef.current;
+      if (!pendingDrag) return;
+
+      if (pendingDrag.dragging) {
+        window.dispatchEvent(
+          new CustomEvent("vibecut-library-drop-request", {
+            detail: {
+              clipId: pendingDrag.clipId,
+              clientX: event.clientX,
+              clientY: event.clientY,
+            },
+          })
+        );
+      }
+
+      pointerDragRef.current = null;
+      document.body.style.userSelect = "";
+    };
+
+    window.addEventListener("mousemove", handleWindowMouseMove);
+    window.addEventListener("mouseup", handleWindowMouseUp);
+
+    return () => {
+      window.removeEventListener("mousemove", handleWindowMouseMove);
+      window.removeEventListener("mouseup", handleWindowMouseUp);
+    };
+  }, []);
 
   return (
     <aside className="flex h-full min-h-0 min-w-0 select-none flex-col overflow-hidden bg-[#141518]">
@@ -80,7 +129,7 @@ export default function MediaBin({
       <div className="mx-3 mt-3 rounded-xl border border-white/8 bg-white/[0.03] px-3 py-4 transition">
         <p className="text-xs font-medium text-white/88">Drop clips here</p>
         <p className="mt-1 text-[11px] leading-5 text-white/40">
-          Import multiple files from disk and drag ready clips into the timeline.
+          Import multiple files from disk and drag clips into the timeline, even while they finish processing.
         </p>
       </div>
 
@@ -138,14 +187,15 @@ export default function MediaBin({
                   <button
                     key={clip.id}
                     type="button"
-                    draggable={clip.status === "ready"}
-                    onDragStart={(event) => {
-                      document.body.style.userSelect = "none";
-                      event.dataTransfer.setData("application/x-vibecut-library-clip", clip.id);
-                      event.dataTransfer.effectAllowed = "copy";
-                    }}
-                    onDragEnd={() => {
-                      document.body.style.userSelect = "";
+                    draggable={false}
+                    onMouseDown={(event) => {
+                      if (event.button !== 0) return;
+                      pointerDragRef.current = {
+                        clipId: clip.id,
+                        startX: event.clientX,
+                        startY: event.clientY,
+                        dragging: false,
+                      };
                     }}
                     onClick={() => onSelectClip(clip.id)}
                     className={`w-full rounded-xl border p-2 text-left transition ${

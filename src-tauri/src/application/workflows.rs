@@ -20,7 +20,7 @@ use crate::{
         },
         runtime::{
             base64_decode, command_available, detect_hardware_encoding, ffprobe_json, generate_thumbnail,
-            now_fingerprint, placeholder_waveform, sidecar_available,
+            normalize_media_path, now_fingerprint, placeholder_waveform, sidecar_available,
         },
     },
     models::{
@@ -37,10 +37,11 @@ pub struct AiEmbeddingResponse {
     pub embeddings: Vec<Vec<f64>>,
 }
 
-fn build_media_asset(cache_dir: &Path, path: &Path) -> anyhow::Result<MediaAsset> {
-    let probe = ffprobe_json(path)?;
-    let duration = probe["format"]["duration"]
-        .as_str()
+fn build_media_asset(path: &Path) -> anyhow::Result<MediaAsset> {
+    let probe = ffprobe_json(path).ok();
+    let duration = probe
+        .as_ref()
+        .and_then(|value| value["format"]["duration"].as_str())
         .and_then(|value| value.parse::<f64>().ok())
         .unwrap_or(0.0);
 
@@ -50,7 +51,7 @@ fn build_media_asset(cache_dir: &Path, path: &Path) -> anyhow::Result<MediaAsset
     let mut height = None;
     let mut has_audio = false;
 
-    if let Some(streams) = probe["streams"].as_array() {
+    if let Some(streams) = probe.as_ref().and_then(|value| value["streams"].as_array()) {
         for stream in streams {
             match stream["codec_type"].as_str() {
                 Some("video") => {
@@ -69,7 +70,6 @@ fn build_media_asset(cache_dir: &Path, path: &Path) -> anyhow::Result<MediaAsset
 
     let id = Uuid::new_v4().to_string();
     let fingerprint = now_fingerprint(path)?;
-    let thumbnail_path = generate_thumbnail(cache_dir, path, &id);
 
     Ok(MediaAsset {
         id,
@@ -89,16 +89,43 @@ fn build_media_asset(cache_dir: &Path, path: &Path) -> anyhow::Result<MediaAsset
         embeddings_ready: false,
         waveform: placeholder_waveform(&fingerprint, 36),
         preview_path: Some(path.to_string_lossy().to_string()),
-        thumbnail_path,
+        thumbnail_path: None,
         waveform_path: None,
         proxy_path: None,
         video_codec,
         audio_codec,
         width,
         height,
-        has_audio: Some(has_audio),
+        has_audio: probe.as_ref().map(|_| has_audio),
         error: None,
     })
+}
+
+fn spawn_thumbnail_generation(app: AppHandle, state: AppState, project_id: String, asset_id: String, path: PathBuf) {
+    tauri::async_runtime::spawn(async move {
+        let cache_dir = state.cache_dir.clone();
+        let asset_id_for_thumbnail = asset_id.clone();
+        let path_for_thumbnail = path.clone();
+
+        let thumbnail_result = tauri::async_runtime::spawn_blocking(move || {
+            generate_thumbnail(&cache_dir, &path_for_thumbnail, &asset_id_for_thumbnail)
+        })
+        .await;
+
+        let Ok(Some(thumbnail_path)) = thumbnail_result else {
+            return;
+        };
+
+        let Ok(Some(mut asset)) = state.database.load_media_asset(&asset_id) else {
+            return;
+        };
+
+        asset.thumbnail_path = Some(thumbnail_path);
+
+        if state.database.upsert_media_assets(&project_id, &[asset.clone()]).is_ok() {
+            let _ = emit_entity_change(&app, "library", Some(asset.id), "updated");
+        }
+    });
 }
 
 fn parse_transcription_payload(asset: &MediaAsset, payload: Value) -> (Vec<TranscriptSegment>, Vec<PauseRange>) {
@@ -234,18 +261,41 @@ pub fn import_media_paths(app: &AppHandle, state: &AppState, paths: Vec<String>)
     let project = state.database.load_project_summary().map_err(|error| error.to_string())?;
     let mut imported = Vec::new();
 
-    for path in paths {
-        let path = PathBuf::from(path);
-        let asset = build_media_asset(&state.cache_dir, &path).map_err(|error| error.to_string())?;
+    for raw_path in paths {
+        let path = normalize_media_path(&raw_path).map_err(|error| error.to_string())?;
+        let asset = build_media_asset(&path).map_err(|error| error.to_string())?;
         state
             .database
             .upsert_media_assets(&project.project_id, &[asset.clone()])
             .map_err(|error| error.to_string())?;
         imported.push(asset.clone());
         emit_entity_change(app, "library", Some(asset.id.clone()), "created")?;
+        spawn_thumbnail_generation(
+            app.clone(),
+            state.clone(),
+            project.project_id.clone(),
+            asset.id.clone(),
+            path,
+        );
     }
 
     Ok(imported)
+}
+
+pub fn remove_library_asset(app: &AppHandle, state: &AppState, asset_id: String) -> Result<(), String> {
+    let project = state.database.load_project_summary().map_err(|error| error.to_string())?;
+    let removed = state
+        .database
+        .remove_media_asset(&project.project_id, &asset_id)
+        .map_err(|error| error.to_string())?;
+
+    if !removed {
+        return Err("Media asset not found".to_string());
+    }
+
+    emit_entity_change(app, "library", Some(asset_id), "deleted")?;
+    emit_entity_change(app, "timeline", None, "updated")?;
+    Ok(())
 }
 
 pub fn apply_timeline_patch(
@@ -339,6 +389,15 @@ pub async fn transcript_run_direct(
     asset.transcript_status = "alignment_ready".to_string();
     asset.error = None;
 
+    if state
+        .database
+        .load_media_asset(&asset_id)
+        .map_err(|error| error.to_string())?
+        .is_none()
+    {
+        return Err("Media asset was removed before transcription completed".to_string());
+    }
+
     state
         .database
         .upsert_media_assets(&project.project_id, &[asset.clone()])
@@ -366,6 +425,16 @@ pub fn enqueue_transcript(app: AppHandle, state: AppState, asset_id: String) -> 
         .map_err(|error| error.to_string())?
     {
         return Ok(job);
+    }
+
+    if let Ok(project) = state.database.load_project_summary() {
+        if let Ok(Some(mut asset)) = state.database.load_media_asset(&asset_id) {
+            asset.status = "processing".to_string();
+            asset.transcript_status = "processing".to_string();
+            asset.error = None;
+            let _ = state.database.upsert_media_assets(&project.project_id, &[asset]);
+            let _ = emit_entity_change(&app, "library", Some(asset_id.clone()), "updated");
+        }
     }
 
     let initial_job = create_job(
@@ -399,6 +468,15 @@ pub fn enqueue_transcript(app: AppHandle, state: AppState, asset_id: String) -> 
             asset.status = "alignment_ready".to_string();
             asset.transcript_status = "alignment_ready".to_string();
             asset.error = None;
+
+            if state
+                .database
+                .load_media_asset(&asset_id)
+                .map_err(|error| error.to_string())?
+                .is_none()
+            {
+                return Err("Media asset was removed before transcription completed".to_string());
+            }
 
             state
                 .database

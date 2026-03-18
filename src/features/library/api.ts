@@ -46,6 +46,11 @@ export async function importMedia(paths: string[]) {
   return assets.map(hydrateAsset);
 }
 
+export async function removeMedia(assetId: string) {
+  if (!isTauriRuntime()) return;
+  await desktopInvoke<void>("library_remove", { assetId });
+}
+
 export async function listenForFileDrop(onPaths: (paths: string[]) => void): Promise<() => void> {
   if (!isTauriRuntime()) return () => undefined;
   const { getCurrentWindow } = await import("@tauri-apps/api/window");
@@ -76,6 +81,22 @@ export function useImportMediaMutation() {
         ...assets,
       ]);
       void queryClient.invalidateQueries({ queryKey: queryKeys.library });
+    },
+  });
+}
+
+export function useRemoveMediaMutation() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: removeMedia,
+    onSuccess: (_, assetId) => {
+      queryClient.setQueryData(queryKeys.library, (current: MediaAsset[] | undefined) =>
+        (current || []).filter((asset) => asset.id !== assetId)
+      );
+      void queryClient.invalidateQueries({ queryKey: queryKeys.library });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.timeline });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.transcript(assetId) });
     },
   });
 }

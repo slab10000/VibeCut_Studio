@@ -1,6 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { EntityChangeEvent, JobRecord } from "@/shared/contracts";
 
+const JOBS_UPDATED_EVENT = "jobs-updated";
+const ENTITIES_CHANGED_EVENT = "entities-changed";
+
 declare global {
   interface Window {
     __TAURI_INTERNALS__?: unknown;
@@ -19,12 +22,10 @@ export async function listenToJobUpdates(onEvent: (job: JobRecord) => void) {
   if (!isTauriRuntime()) return () => undefined;
 
   const { listen } = await import("@tauri-apps/api/event");
-  const unlistenNew = await listen<JobRecord>("jobs.updated", (event) => onEvent(event.payload));
-  const unlistenLegacy = await listen<JobRecord>("jobs://updated", (event) => onEvent(event.payload));
+  const unlisten = await listen<JobRecord>(JOBS_UPDATED_EVENT, (event) => onEvent(event.payload));
 
   return () => {
-    void unlistenNew();
-    void unlistenLegacy();
+    void unlisten();
   };
 }
 
@@ -32,7 +33,7 @@ export async function listenToEntityChanges(onEvent: (event: EntityChangeEvent) 
   if (!isTauriRuntime()) return () => undefined;
 
   const { listen } = await import("@tauri-apps/api/event");
-  const unlisten = await listen<EntityChangeEvent>("entities.changed", (event) => onEvent(event.payload));
+  const unlisten = await listen<EntityChangeEvent>(ENTITIES_CHANGED_EVENT, (event) => onEvent(event.payload));
 
   return () => {
     void unlisten();

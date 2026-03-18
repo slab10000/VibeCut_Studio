@@ -33,9 +33,12 @@ interface DockContext {
     segments: LibraryClip["transcriptSegments"];
     pauses: PauseRange[];
     currentTime: number;
+    canRetranscribe?: boolean;
+    isRetranscribing?: boolean;
     selection: TranscriptSelection | null;
     activeRange?: { startTime: number; endTime: number } | null;
     onSeek: (time: number) => void;
+    onRetranscribe?: () => void;
     onSelectionChange: (selection: TranscriptSelection | null) => void;
     onRemoveSelection: () => void;
     onRemoveSegment: (segmentId: string) => void;
@@ -196,9 +199,12 @@ export const dockFeatureManifests: DockFeatureManifest[] = [
         segments={transcript.segments}
         pauses={transcript.pauses}
         currentTime={transcript.currentTime}
+        canRetranscribe={transcript.canRetranscribe}
+        isRetranscribing={transcript.isRetranscribing}
         selection={transcript.selection}
         activeRange={transcript.activeRange}
         onSeek={transcript.onSeek}
+        onRetranscribe={transcript.onRetranscribe}
         onSelectionChange={transcript.onSelectionChange}
         onRemoveSelection={transcript.onRemoveSelection}
         onRemoveSegment={transcript.onRemoveSegment}

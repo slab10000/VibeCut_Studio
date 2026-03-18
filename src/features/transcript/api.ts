@@ -39,9 +39,33 @@ export function useEnqueueTranscriptMutation() {
 
   return useMutation({
     mutationFn: enqueueTranscript,
+    onMutate: async (assetId) => {
+      const markPending = (asset: MediaAsset | null | undefined) => {
+        if (!asset) return asset ?? null;
+        return hydrateAsset({
+          ...asset,
+          status: "processing",
+          transcriptStatus: "processing",
+          error: null,
+        });
+      };
+
+      queryClient.setQueryData(queryKeys.library, (current: MediaAsset[] | undefined) =>
+        (current || []).map((asset) => (asset.id === assetId ? markPending(asset)! : asset))
+      );
+      queryClient.setQueryData(queryKeys.transcript(assetId), (current: MediaAsset | null | undefined) =>
+        markPending(current)
+      );
+    },
     onSuccess: (_job, assetId) => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.jobs });
       void queryClient.invalidateQueries({ queryKey: queryKeys.transcript(assetId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.library });
+    },
+    onError: (_error, assetId) => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.jobs });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.transcript(assetId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.library });
     },
   });
 }

@@ -2,10 +2,10 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "vite",
+      "name": "vite-preview",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev:web"],
-      "port": 1420
+      "runtimeArgs": ["run", "preview"],
+      "port": 1421
     },
     {
       "name": "sidecar",

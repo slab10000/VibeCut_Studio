@@ -18,10 +18,14 @@ fn main() {
             let app_data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&app_data_dir)?;
             let cache_dir = app_data_dir.join("cache");
+            if cache_dir.exists() {
+                std::fs::remove_dir_all(&cache_dir)?;
+            }
             std::fs::create_dir_all(&cache_dir)?;
 
             let database = db::Database::new(app_data_dir.join("project.sqlite"));
             database.initialize()?;
+            database.reset_session_state()?;
 
             app.manage(AppState {
                 database,
@@ -48,6 +52,7 @@ fn main() {
             tauri_commands::queries::jobs_list,
             tauri_commands::queries::capabilities_get,
             tauri_commands::mutations::library_import_paths,
+            tauri_commands::mutations::library_remove,
             tauri_commands::mutations::timeline_apply_patch,
             tauri_commands::jobs::transcript_enqueue,
             tauri_commands::jobs::ai_enqueue_edit_command,

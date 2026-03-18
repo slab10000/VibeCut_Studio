@@ -8,7 +8,13 @@ import VideoPlayer from "@/components/VideoPlayer";
 import { dockFeatureManifests } from "@/features/registry/dock-manifests";
 import { parseAiEditResult, useEnqueueAiEditMutation } from "@/features/ai/api";
 import { useEnqueueExportMutation, pickSavePath } from "@/features/export/api";
-import { createPreviewUrl, listenForFileDrop, pickVideoPaths, useImportMediaMutation, useLibraryQuery } from "@/features/library/api";
+import {
+  listenForFileDrop,
+  pickVideoPaths,
+  useImportMediaMutation,
+  useLibraryQuery,
+  useRemoveMediaMutation,
+} from "@/features/library/api";
 import { useJobsQuery } from "@/features/jobs/api";
 import { usePlaybackStore } from "@/features/playback/store/playback-store";
 import { useCapabilitiesQuery, useProjectQuery } from "@/features/project/api";
@@ -31,6 +37,14 @@ import { useDesktopEvents } from "@/shared/desktop/useDesktopEvents";
 
 const ROOM_TONE_SECONDS = 0.12;
 const DEFAULT_PAUSE_THRESHOLD_SECONDS = 0.4;
+const SEEK_TOLERANCE_SECONDS = 0.08;
+const PENDING_SOURCE_DURATION_EFFECT = "pending_source_duration";
+const PENDING_TIMELINE_CLIP_DURATION_SECONDS = 1;
+const PREVIEW_PANEL_MIN_HEIGHT = 250;
+const TIMELINE_PANEL_MIN_HEIGHT = 180;
+const TIMELINE_PANEL_AUTO_HEIGHT = 320;
+const TIMELINE_PANEL_MAX_HEIGHT = 520;
+const PANEL_RESIZE_HANDLE_HEIGHT = 4;
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
@@ -40,6 +54,16 @@ function formatTime(seconds: number) {
   const mins = Math.floor(seconds / 60);
   const secs = Math.floor(seconds % 60);
   return `${mins}:${secs.toString().padStart(2, "0")}`;
+}
+
+function getErrorMessage(error: unknown) {
+  if (typeof error === "string" && error.trim()) return error;
+  if (error instanceof Error && error.message.trim()) return error.message;
+  if (error && typeof error === "object" && "message" in error) {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === "string" && message.trim()) return message;
+  }
+  return "Failed to import media.";
 }
 
 function buildTimelineClip(sourceClipId: string, startTime: number, endTime: number, label?: string): TimelineClip {
@@ -117,11 +141,70 @@ export default function EditorShell() {
   useDesktopEvents();
 
   const videoRef = useRef<HTMLVideoElement>(null);
+  const centerColumnRef = useRef<HTMLElement>(null);
   const monitorModeRef = useRef<MonitorMode>("source");
   const activeProgramClipRef = useRef<string | null>(null);
   const transcriptionQueueRef = useRef(new Set<string>());
   const lastPersistedTimelineRef = useRef("");
   const handledAiJobRef = useRef<string | null>(null);
+
+  const [leftPanelWidth, setLeftPanelWidth] = useState(300);
+  const [rightPanelWidth, setRightPanelWidth] = useState(360);
+  const [timelineHeightPreference, setTimelineHeightPreference] = useState<number | null>(null);
+  const [maxTimelineHeight, setMaxTimelineHeight] = useState(320);
+  type PanelDrag =
+    | { panel: "left" | "right"; startX: number; startWidth: number }
+    | { panel: "timeline"; startY: number; startHeight: number };
+  const panelDragRef = useRef<PanelDrag | null>(null);
+  const minimumTimelineHeight = Math.min(TIMELINE_PANEL_MIN_HEIGHT, maxTimelineHeight);
+  const resolvedTimelineHeight =
+    timelineHeightPreference === null
+      ? clamp(TIMELINE_PANEL_AUTO_HEIGHT, minimumTimelineHeight, maxTimelineHeight)
+      : clamp(timelineHeightPreference, minimumTimelineHeight, maxTimelineHeight);
+
+  useEffect(() => {
+    const element = centerColumnRef.current;
+    if (!element || typeof ResizeObserver === "undefined") return;
+
+    const updateMaxTimelineHeight = () => {
+      const availableHeight = element.clientHeight - PREVIEW_PANEL_MIN_HEIGHT - PANEL_RESIZE_HANDLE_HEIGHT;
+      setMaxTimelineHeight(clamp(availableHeight, 0, TIMELINE_PANEL_MAX_HEIGHT));
+    };
+
+    updateMaxTimelineHeight();
+
+    const observer = new ResizeObserver(() => {
+      updateMaxTimelineHeight();
+    });
+    observer.observe(element);
+
+    return () => {
+      observer.disconnect();
+    };
+  }, []);
+
+  useEffect(() => {
+    const onMouseMove = (e: MouseEvent) => {
+      const drag = panelDragRef.current;
+      if (!drag) return;
+      if (drag.panel === "left") {
+        setLeftPanelWidth(clamp(drag.startWidth + (e.clientX - drag.startX), 200, 520));
+      } else if (drag.panel === "right") {
+        setRightPanelWidth(clamp(drag.startWidth - (e.clientX - drag.startX), 220, 520));
+      } else {
+        setTimelineHeightPreference(
+          clamp(drag.startHeight - (e.clientY - drag.startY), minimumTimelineHeight, maxTimelineHeight)
+        );
+      }
+    };
+    const onMouseUp = () => { panelDragRef.current = null; };
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+    return () => {
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+    };
+  }, [maxTimelineHeight, minimumTimelineHeight]);
 
   const selectedSourceClipId = useSessionStore((state) => state.selectedSourceClipId);
   const selectedTimelineClipId = useSessionStore((state) => state.selectedTimelineClipId);
@@ -161,13 +244,15 @@ export default function EditorShell() {
   const jobsQuery = useJobsQuery();
   const capabilitiesQuery = useCapabilitiesQuery();
   const importMediaMutation = useImportMediaMutation();
+  const removeMediaMutation = useRemoveMediaMutation();
   const applyTimelinePatchMutation = useApplyTimelinePatchMutation();
   const enqueueTranscriptMutation = useEnqueueTranscriptMutation();
   const enqueueAiEditMutation = useEnqueueAiEditMutation();
   const enqueueExportMutation = useEnqueueExportMutation();
 
   const libraryClips = libraryQuery.data || [];
-  const { timeline, dispatchWithUndo, undo } = useTimelineEditor(timelineQuery.data || []);
+  const serverTimelineClips = useMemo(() => timelineQuery.data || [], [timelineQuery.data]);
+  const { timeline, dispatch: dispatchTimeline, dispatchWithUndo, undo } = useTimelineEditor(serverTimelineClips);
   const jobs = jobsQuery.data || [];
   const capabilities = capabilitiesQuery.data || null;
 
@@ -294,9 +379,24 @@ export default function EditorShell() {
       : currentProgramPlacement?.label || currentProgramPlacement?.source?.fileName || "Sequence monitor";
 
   const activeAiJob = jobs.find((job) => job.id === pendingAiEditJobId);
+  const activeTranscriptJob = transcriptClip
+    ? jobs.find(
+        (job) =>
+          job.kind === "transcript" &&
+          job.targetId === transcriptClip.id &&
+          (job.status === "queued" || job.status === "running")
+      ) || null
+    : null;
   const isAiProcessing =
     enqueueAiEditMutation.isPending ||
     Boolean(activeAiJob && (activeAiJob.status === "queued" || activeAiJob.status === "running"));
+  const isTranscriptProcessing =
+    Boolean(
+      transcriptClip &&
+        (transcriptClip.transcriptStatus === "processing" ||
+          transcriptClip.transcriptStatus === "queued" ||
+          activeTranscriptJob)
+    ) || false;
   const isExporting = jobs.some(
     (job) => job.kind === "export" && (job.status === "queued" || job.status === "running")
   );
@@ -324,15 +424,19 @@ export default function EditorShell() {
     const video = videoRef.current;
     if (!video) return;
 
+    const safeTargetTime = Math.max(0, targetTime);
+
     const seekAndPlay = () => {
       const apply = () => {
         try {
-          video.currentTime = Math.max(0, targetTime);
+          if (Math.abs(video.currentTime - safeTargetTime) > SEEK_TOLERANCE_SECONDS) {
+            video.currentTime = safeTargetTime;
+          }
         } catch {
           return;
         }
 
-        if (autoplay) {
+        if (autoplay && video.paused) {
           void video.play().catch(() => {
             setIsPlaying(false);
           });
@@ -343,7 +447,9 @@ export default function EditorShell() {
       else video.addEventListener("loadedmetadata", apply, { once: true });
     };
 
-    if (video.src !== url) {
+    const currentSource = video.currentSrc || video.src;
+
+    if (currentSource !== url) {
       video.pause();
       video.src = url;
       video.load();
@@ -451,7 +557,18 @@ export default function EditorShell() {
   );
 
   const handleImportPaths = useCallback(async (paths: string[]) => {
-    const imported = await importMediaMutation.mutateAsync(paths);
+    setBootstrapError(null);
+
+    let imported: LibraryClip[] = [];
+    try {
+      imported = await importMediaMutation.mutateAsync(paths);
+    } catch (error) {
+      const message = getErrorMessage(error);
+      console.error("Failed to import media:", error);
+      setBootstrapError(message);
+      return;
+    }
+
     if (imported.length === 0) return;
 
     setSelectedSourceClipId(imported[0].id);
@@ -460,10 +577,12 @@ export default function EditorShell() {
 
     if (capabilities?.sidecarAvailable) {
       for (const clip of imported) {
-        await queueTranscription(clip);
+        void queueTranscription(clip).catch((error) => {
+          console.error("Failed to enqueue transcript job:", error);
+        });
       }
     }
-  }, [capabilities?.sidecarAvailable, importMediaMutation, queueTranscription, setDockTab, setSelectedSourceClipId, setSelectedTimelineClipId]);
+  }, [capabilities?.sidecarAvailable, importMediaMutation, queueTranscription, setBootstrapError, setDockTab, setSelectedSourceClipId, setSelectedTimelineClipId]);
 
   const handleImportRequest = useCallback(async () => {
     const paths = await pickVideoPaths();
@@ -481,6 +600,53 @@ export default function EditorShell() {
     syncSourcePreview(clip, 0, false);
   }, [libraryClips, setDockTab, setMonitorMode, setSelectedSourceClipId, setSelectedTimelineClipId, syncSourcePreview]);
 
+  const handleRemoveSelectedSourceClip = useCallback(async () => {
+    if (!selectedSourceClipId || removeMediaMutation.isPending) return;
+
+    const selectedIndex = libraryClips.findIndex((clip) => clip.id === selectedSourceClipId);
+    if (selectedIndex === -1) return;
+
+    const nextClip = libraryClips[selectedIndex + 1] || libraryClips[selectedIndex - 1] || null;
+
+    try {
+      await removeMediaMutation.mutateAsync(selectedSourceClipId);
+    } catch (error) {
+      console.error("Failed to remove media asset:", error);
+      return;
+    }
+
+    setSearchResults((current) =>
+      current ? current.filter((result) => result.sourceClipId !== selectedSourceClipId) : current
+    );
+    setTranscriptSelection(null);
+
+    if (selectedTimelineClip?.sourceClipId === selectedSourceClipId) {
+      setSelectedTimelineClipId(null);
+    }
+
+    setSelectedSourceClipId(nextClip?.id || null);
+
+    if (monitorMode === "source") {
+      if (nextClip) {
+        syncSourcePreview(nextClip, 0, false);
+      } else {
+        setSourceTime(0);
+        syncSourcePreview(null, 0, false);
+      }
+    }
+  }, [
+    libraryClips,
+    monitorMode,
+    removeMediaMutation,
+    selectedSourceClipId,
+    selectedTimelineClip?.sourceClipId,
+    setSelectedSourceClipId,
+    setSelectedTimelineClipId,
+    setSourceTime,
+    setTranscriptSelection,
+    syncSourcePreview,
+  ]);
+
   const handleSelectTimelineClip = useCallback((clipId: string | null) => {
     setSelectedTimelineClipId(clipId);
     if (!clipId) return;
@@ -496,13 +662,16 @@ export default function EditorShell() {
 
   const handleAppendFromLibrary = useCallback((sourceClipId: string) => {
     const sourceClip = libraryClips.find((clip) => clip.id === sourceClipId);
-    if (!sourceClip || sourceClip.status === "queued" || sourceClip.status === "processing") return;
+    if (!sourceClip) return;
+
+    const hasResolvedDuration = sourceClip.duration > 0;
 
     dispatchWithUndo({
       type: "ADD_SOURCE_CLIP",
       sourceClipId: sourceClip.id,
-      duration: sourceClip.duration,
+      duration: hasResolvedDuration ? sourceClip.duration : PENDING_TIMELINE_CLIP_DURATION_SECONDS,
       label: sourceClip.fileName,
+      pendingSourceDuration: !hasResolvedDuration,
     });
 
     setSelectedSourceClipId(sourceClip.id);
@@ -584,6 +753,14 @@ export default function EditorShell() {
     dispatchWithUndo({ type: "REMOVE_RANGES", ranges });
     setMonitorMode("program");
   }, [dispatchWithUndo, selectedTranscriptRange, setMonitorMode, transcriptPauses]);
+
+  const handleRetranscribe = useCallback(() => {
+    if (!transcriptClip || transcriptClip.hasAudio === false || isTranscriptProcessing) return;
+    setTranscriptSelection(null);
+    void enqueueTranscriptMutation.mutateAsync(transcriptClip.id).catch((error) => {
+      console.error("Failed to re-transcribe clip:", error);
+    });
+  }, [enqueueTranscriptMutation, isTranscriptProcessing, setTranscriptSelection, transcriptClip]);
 
   const handleMonitorSeek = useCallback((time: number) => {
     if (monitorMode === "program") {
@@ -674,10 +851,48 @@ export default function EditorShell() {
   }, [capabilitiesQuery.error, libraryQuery.error, setBootstrapError, timelineQuery.error]);
 
   useEffect(() => {
-    if (!selectedSourceClipId && libraryClips[0]) {
-      setSelectedSourceClipId(libraryClips[0].id);
+    const selectedClipStillExists = selectedSourceClipId
+      ? libraryClips.some((clip) => clip.id === selectedSourceClipId)
+      : false;
+
+    if (selectedClipStillExists) return;
+
+    const nextSelectedClipId = libraryClips[0]?.id || null;
+    if (selectedSourceClipId !== nextSelectedClipId) {
+      setSelectedSourceClipId(nextSelectedClipId);
     }
   }, [libraryClips, selectedSourceClipId, setSelectedSourceClipId]);
+
+  useEffect(() => {
+    if (!selectedTimelineClipId) return;
+    if (!timeline.clips.some((clip) => clip.id === selectedTimelineClipId)) {
+      setSelectedTimelineClipId(null);
+    }
+  }, [selectedTimelineClipId, setSelectedTimelineClipId, timeline.clips]);
+
+  useEffect(() => {
+    let hasChanges = false;
+
+    const reconciledClips = timeline.clips.map((clip) => {
+      if (clip.type !== "video" || !clip.sourceClipId) return clip;
+      if (!clip.effects.some((effect) => effect.type === PENDING_SOURCE_DURATION_EFFECT)) return clip;
+
+      const sourceClip = libraryClips.find((item) => item.id === clip.sourceClipId);
+      if (!sourceClip || sourceClip.duration <= 0) return clip;
+
+      hasChanges = true;
+      return {
+        ...clip,
+        sourceEndTime: sourceClip.duration,
+        duration: sourceClip.duration,
+        label: clip.label || sourceClip.fileName,
+        effects: clip.effects.filter((effect) => effect.type !== PENDING_SOURCE_DURATION_EFFECT),
+      };
+    });
+
+    if (!hasChanges) return;
+    dispatchTimeline({ type: "SET_CLIPS", clips: reconciledClips });
+  }, [dispatchTimeline, libraryClips, timeline.clips]);
 
   useEffect(() => {
     if (!timelineQuery.isSuccess) return;
@@ -703,16 +918,23 @@ export default function EditorShell() {
     );
 
     pending.forEach((clip) => {
-      void queueTranscription(clip.id);
+      void queueTranscription(clip.id).catch((error) => {
+        console.error("Failed to enqueue transcript job:", error);
+      });
     });
   }, [capabilities?.sidecarAvailable, libraryClips, queueTranscription]);
+
+  // Keep a ref to the latest handleImportPaths so the listener never needs
+  // to re-register when capabilities load (which would leave a dangling listener).
+  const handleImportPathsRef = useRef(handleImportPaths);
+  useEffect(() => { handleImportPathsRef.current = handleImportPaths; }, [handleImportPaths]);
 
   useEffect(() => {
     let cleanup: (() => void) | undefined;
     let cancelled = false;
 
     void listenForFileDrop((paths) => {
-      void handleImportPaths(paths);
+      void handleImportPathsRef.current(paths);
     }).then((unlisten) => {
       if (cancelled) unlisten();
       else cleanup = unlisten;
@@ -722,7 +944,8 @@ export default function EditorShell() {
       cancelled = true;
       cleanup?.();
     };
-  }, [handleImportPaths]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (!pendingAiEditJobId) return;
@@ -760,6 +983,12 @@ export default function EditorShell() {
         return;
       }
 
+      if (!event.metaKey && !event.ctrlKey && !event.altKey && event.key === "Backspace") {
+        event.preventDefault();
+        void handleRemoveSelectedSourceClip();
+        return;
+      }
+
       if ((event.metaKey || event.ctrlKey) && event.key === "z") {
         event.preventDefault();
         undo();
@@ -768,7 +997,7 @@ export default function EditorShell() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [dockTab, handleRemoveTranscriptSelection, handleTogglePlay, transcriptSelection, undo]);
+  }, [dockTab, handleRemoveSelectedSourceClip, handleRemoveTranscriptSelection, handleTogglePlay, transcriptSelection, undo]);
 
   useEffect(() => {
     const handleDragOver = (event: DragEvent) => {
@@ -794,17 +1023,51 @@ export default function EditorShell() {
 
   useEffect(() => {
     if (monitorMode !== "source") return;
-    syncSourcePreview(selectedSourceClip, sourceTime, false);
-  }, [monitorMode, selectedSourceClip, sourceTime, syncSourcePreview]);
+
+    if (!selectedSourceClip?.previewUrl) {
+      videoRef.current?.pause();
+      setIsPlaying(false);
+      return;
+    }
+
+    const video = videoRef.current;
+    const currentSource = video?.currentSrc || video?.src || "";
+    if (currentSource !== selectedSourceClip.previewUrl) {
+      syncSourcePreview(selectedSourceClip, sourceTime, false);
+    }
+  }, [monitorMode, selectedSourceClip, setIsPlaying, syncSourcePreview]);
 
   useEffect(() => {
-    if (monitorMode !== "program" || timeline.clips.length === 0) return;
-    syncProgramPreview(clamp(programTime, 0, Math.max(timeline.totalDuration, 0)), false);
-  }, [monitorMode, programTime, syncProgramPreview, timeline.clips.length, timeline.totalDuration]);
+    if (monitorMode !== "program") return;
+
+    if (!currentProgramPlacement) {
+      videoRef.current?.pause();
+      setIsPlaying(false);
+      return;
+    }
+
+    if (currentProgramPlacement.type === "image") {
+      videoRef.current?.pause();
+      setIsPlaying(false);
+      return;
+    }
+
+    const previewUrl = currentProgramPlacement.source?.previewUrl;
+    if (!previewUrl) return;
+
+    const video = videoRef.current;
+    const currentSource = video?.currentSrc || video?.src || "";
+    if (currentSource !== previewUrl) {
+      syncProgramPreview(programTime, false);
+    }
+  }, [currentProgramPlacement, monitorMode, setIsPlaying, syncProgramPreview]);
 
   useEffect(() => {
     const video = videoRef.current;
-    if (!video) return;
+    if (!video || !monitorVideoUrl) {
+      setIsPlaying(false);
+      return;
+    }
 
     const onTimeUpdate = () => {
       if (monitorModeRef.current === "source") {
@@ -834,6 +1097,8 @@ export default function EditorShell() {
     const onPlay = () => setIsPlaying(true);
     const onPause = () => setIsPlaying(false);
 
+    setIsPlaying(!video.paused && !video.ended);
+
     video.addEventListener("timeupdate", onTimeUpdate);
     video.addEventListener("play", onPlay);
     video.addEventListener("pause", onPause);
@@ -843,7 +1108,7 @@ export default function EditorShell() {
       video.removeEventListener("play", onPlay);
       video.removeEventListener("pause", onPause);
     };
-  }, [clipsWithOffsets, setIsPlaying, setProgramTime, setSourceTime, syncProgramPreview, timeline.totalDuration]);
+  }, [clipsWithOffsets, monitorVideoUrl, setIsPlaying, setProgramTime, setSourceTime, syncProgramPreview, timeline.totalDuration]);
 
   const capabilitiesText = [
     `ffmpeg: ${capabilities?.ffmpegAvailable ? "available" : "missing"}`,
@@ -913,7 +1178,14 @@ export default function EditorShell() {
         </div>
       </header>
 
-      <div className="grid min-h-0 min-w-0 flex-1 grid-cols-[300px_minmax(0,1fr)_360px] overflow-hidden">
+      {bootstrapError && (
+        <div className="border-b border-red-400/12 bg-red-500/8 px-5 py-2 text-sm text-red-200/90">
+          {bootstrapError}
+        </div>
+      )}
+
+      <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
+        <div className="flex-none overflow-hidden" style={{ width: leftPanelWidth }}>
         <MediaBin
           clips={libraryClips}
           selectedClipId={selectedSourceClipId}
@@ -931,8 +1203,18 @@ export default function EditorShell() {
             setSearchResults(null);
           }}
         />
+        </div>
 
-        <main className="flex min-h-0 min-w-0 flex-col overflow-hidden bg-[#0d0e12]">
+        {/* Left resize handle */}
+        <div
+          className="w-1 shrink-0 cursor-col-resize bg-transparent transition-colors hover:bg-sky-400/30 select-none"
+          onMouseDown={(e) => {
+            panelDragRef.current = { panel: "left", startX: e.clientX, startWidth: leftPanelWidth };
+            e.preventDefault();
+          }}
+        />
+
+        <main ref={centerColumnRef} className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-[#0d0e12]">
           <section className="flex min-h-[250px] flex-1 flex-col overflow-hidden p-4">
             <div className="mb-3 flex shrink-0 min-w-0 items-center justify-between gap-3">
               <div className="inline-flex rounded-xl border border-white/8 bg-[#131419] p-1">
@@ -974,7 +1256,18 @@ export default function EditorShell() {
             />
           </section>
 
-          <section className="min-h-[220px] shrink overflow-hidden p-4 pt-1">
+          {/* Timeline resize handle */}
+          <div
+            className="h-1 shrink-0 cursor-row-resize bg-transparent transition-colors hover:bg-sky-400/30 select-none"
+            onMouseDown={(e) => {
+              panelDragRef.current = { panel: "timeline", startY: e.clientY, startHeight: resolvedTimelineHeight };
+              e.preventDefault();
+            }}
+            onDoubleClick={() => setTimelineHeightPreference(null)}
+            title="Drag to resize timeline. Double-click to auto-fit."
+          />
+
+          <section className="shrink-0 overflow-hidden p-4 pt-1" style={{ height: resolvedTimelineHeight }}>
             <Timeline
               clips={timeline.clips}
               libraryClips={libraryClips}
@@ -989,7 +1282,16 @@ export default function EditorShell() {
           </section>
         </main>
 
-        <aside className="flex min-h-0 min-w-0 flex-col overflow-hidden bg-[#141518]">
+        {/* Right resize handle */}
+        <div
+          className="w-1 shrink-0 cursor-col-resize bg-transparent transition-colors hover:bg-sky-400/30 select-none"
+          onMouseDown={(e) => {
+            panelDragRef.current = { panel: "right", startX: e.clientX, startWidth: rightPanelWidth };
+            e.preventDefault();
+          }}
+        />
+
+        <aside className="flex min-h-0 min-w-0 flex-col overflow-hidden bg-[#141518]" style={{ width: rightPanelWidth, flexShrink: 0 }}>
           <div className="border-b border-white/8 px-4 py-3">
             <p className="text-[10px] uppercase tracking-[0.22em] text-white/32">Dock</p>
             <div className="mt-3 grid grid-cols-4 rounded-xl border border-white/8 bg-white/[0.03] p-1">
@@ -1023,9 +1325,12 @@ export default function EditorShell() {
                 segments: transcriptClip?.transcriptSegments || [],
                 pauses: transcriptPauses,
                 currentTime: activeTranscriptTime,
+                canRetranscribe: Boolean(transcriptClip && transcriptClip.hasAudio !== false),
+                isRetranscribing: isTranscriptProcessing,
                 selection: transcriptSelection,
                 activeRange: selectedTranscriptRange,
                 onSeek: handleTranscriptSeek,
+                onRetranscribe: handleRetranscribe,
                 onSelectionChange: (selection: TranscriptSelection | null) => setTranscriptSelection(selection),
                 onRemoveSelection: handleRemoveTranscriptSelection,
                 onRemoveSegment: handleRemoveTranscriptSegment,

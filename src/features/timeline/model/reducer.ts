@@ -1,6 +1,8 @@
 import { TimelineAction, TimelineClip, TimelineRange, TimelineState } from "@/shared/contracts";
 import { v4 as uuid } from "uuid";
 
+const PENDING_SOURCE_DURATION_EFFECT = "pending_source_duration";
+
 function computeTotalDuration(clips: TimelineClip[]): number {
   return clips.reduce((sum, clip) => sum + clip.duration, 0);
 }
@@ -51,6 +53,17 @@ function buildVideoClip(
     enabled: true,
     kind: "video",
     effects: [],
+  };
+}
+
+function stripPendingSourceDurationEffect(clip: TimelineClip): TimelineClip {
+  if (!clip.effects.some((effect) => effect.type === PENDING_SOURCE_DURATION_EFFECT)) {
+    return clip;
+  }
+
+  return {
+    ...clip,
+    effects: clip.effects.filter((effect) => effect.type !== PENDING_SOURCE_DURATION_EFFECT),
   };
 }
 
@@ -120,6 +133,15 @@ export function timelineReducer(state: TimelineState, action: TimelineAction): T
   switch (action.type) {
     case "ADD_SOURCE_CLIP": {
       const newClip = buildVideoClip(action.sourceClipId, 0, action.duration, action.label);
+      if (action.pendingSourceDuration) {
+        newClip.effects = [
+          {
+            id: uuid(),
+            type: PENDING_SOURCE_DURATION_EFFECT,
+            config: { sourceClipId: action.sourceClipId },
+          },
+        ];
+      }
       const clips = withTimelineMetadata([...state.clips, newClip]);
       return { ...state, clips, totalDuration: computeTotalDuration(clips) };
     }
@@ -193,8 +215,9 @@ export function timelineReducer(state: TimelineState, action: TimelineAction): T
       const clips = withTimelineMetadata(
         state.clips.map((clip) => {
           if (clip.id !== action.clipId || clip.type !== "video") return clip;
+          const nextClip = stripPendingSourceDurationEffect(clip);
           return {
-            ...clip,
+            ...nextClip,
             sourceStartTime: action.newStart,
             sourceEndTime: action.newEnd,
             duration: Math.max(0, action.newEnd - action.newStart),
