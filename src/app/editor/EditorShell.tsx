@@ -790,7 +790,20 @@ export default function EditorShell() {
     setSelectedTimelineClipId(null);
     setMonitorMode("source");
     syncSourcePreview(transcriptClip, time, false);
-  }, [setMonitorMode, setSelectedSourceClipId, setSelectedTimelineClipId, syncSourcePreview, transcriptClip]);
+
+    // Also move the timeline playhead to the matching sequence position if this
+    // source clip appears in the timeline at this source time.
+    const matchingClip = clipsWithOffsets.find(
+      (clip) =>
+        clip.sourceClipId === transcriptClip.id &&
+        clip.type === "video" &&
+        time >= clip.sourceStartTime &&
+        time < clip.sourceEndTime
+    );
+    if (matchingClip) {
+      setProgramTime(matchingClip.sequenceStart + (time - matchingClip.sourceStartTime));
+    }
+  }, [clipsWithOffsets, setProgramTime, setMonitorMode, setSelectedSourceClipId, setSelectedTimelineClipId, syncSourcePreview, transcriptClip]);
 
   const handleTogglePlay = useCallback(() => {
     const video = videoRef.current;

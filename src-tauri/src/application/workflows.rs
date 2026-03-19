@@ -20,7 +20,7 @@ use crate::{
         },
         runtime::{
             base64_decode, command_available, detect_hardware_encoding, ffprobe_json, generate_thumbnail,
-            normalize_media_path, now_fingerprint, placeholder_waveform, sidecar_available,
+            extract_waveform, normalize_media_path, now_fingerprint, sidecar_available,
         },
     },
     models::{
@@ -87,7 +87,7 @@ fn build_media_asset(path: &Path) -> anyhow::Result<MediaAsset> {
         transcript_segments: Vec::new(),
         pause_ranges: Vec::new(),
         embeddings_ready: false,
-        waveform: placeholder_waveform(&fingerprint, 36),
+        waveform: extract_waveform(path, 256),
         preview_path: Some(path.to_string_lossy().to_string()),
         thumbnail_path: None,
         waveform_path: None,

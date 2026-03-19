@@ -79,19 +79,67 @@ pub fn now_fingerprint(path: &Path) -> anyhow::Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-pub fn placeholder_waveform(seed: &str, points: usize) -> Vec<f64> {
-    let mut hash: i64 = 0;
-    for character in seed.bytes() {
-        hash = (hash * 31 + character as i64) % 9973;
+/// Extract a real audio waveform by decoding audio via FFmpeg to raw f32le PCM,
+/// then computing RMS amplitude per time bucket. Returns normalized 0.0–1.0 values.
+pub fn extract_waveform(path: &Path, points: usize) -> Vec<f64> {
+    let output = Command::new("ffmpeg")
+        .args([
+            "-i",
+            &path.to_string_lossy(),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "8000",
+            "-f",
+            "f32le",
+            "-",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output();
+
+    let raw = match output {
+        Ok(out) if !out.stdout.is_empty() => out.stdout,
+        _ => return vec![0.0; points],
+    };
+
+    // Interpret raw bytes as f32 PCM samples (little-endian)
+    let samples: Vec<f32> = raw
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect();
+
+    if samples.is_empty() {
+        return vec![0.0; points];
     }
 
-    (0..points)
-        .map(|index| {
-            let value =
-                (((hash + index as i64 * 13) as f64) / 11.0).sin() * 0.18 + (((hash + index as i64 * 7) as f64) / 17.0).cos() * 0.12;
-            (0.28 + value.abs()).clamp(0.18, 0.78)
-        })
-        .collect()
+    let bucket_size = (samples.len() as f64 / points as f64).ceil() as usize;
+    let mut waveform: Vec<f64> = Vec::with_capacity(points);
+
+    for i in 0..points {
+        let start = i * bucket_size;
+        let end = ((i + 1) * bucket_size).min(samples.len());
+        if start >= samples.len() {
+            waveform.push(0.0);
+            continue;
+        }
+
+        let bucket = &samples[start..end];
+        // RMS (root mean square) amplitude for this bucket
+        let rms = (bucket.iter().map(|s| (*s as f64) * (*s as f64)).sum::<f64>() / bucket.len() as f64).sqrt();
+        waveform.push(rms);
+    }
+
+    // Normalize to 0.0–1.0 by peak RMS
+    let peak = waveform.iter().cloned().fold(0.0_f64, f64::max);
+    if peak > 0.0 {
+        for value in &mut waveform {
+            *value /= peak;
+        }
+    }
+
+    waveform
 }
 
 pub fn ffprobe_json(path: &Path) -> anyhow::Result<Value> {

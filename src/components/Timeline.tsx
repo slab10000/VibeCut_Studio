@@ -27,14 +27,41 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
 }
 
-function renderWaveform(waveform: number[]) {
-  return waveform.map((sample, index) => (
-    <span
-      key={`${index}-${sample}`}
-      className="flex-1 rounded-full bg-sky-300/75"
-      style={{ height: `${Math.max(14, sample * 100)}%` }}
-    />
-  ));
+function WaveformSvg({ waveform, isSelected }: { waveform: number[]; isSelected: boolean }) {
+  const n = waveform.length;
+  if (n === 0) return null;
+
+  const w = 1000;
+  const h = 100;
+  const mid = h / 2;
+  const barW = w / n;
+  const fill = isSelected ? "rgba(56,189,248,0.65)" : "rgba(56,189,248,0.50)";
+
+  // Build a single SVG path for the mirrored waveform shape (top half + bottom half)
+  let d = `M 0 ${mid}`;
+  for (let i = 0; i < n; i++) {
+    const amp = waveform[i] * mid * 0.92;
+    const x = i * barW + barW / 2;
+    d += ` L ${x} ${mid - amp}`;
+  }
+  d += ` L ${w} ${mid}`;
+  for (let i = n - 1; i >= 0; i--) {
+    const amp = waveform[i] * mid * 0.92;
+    const x = i * barW + barW / 2;
+    d += ` L ${x} ${mid + amp}`;
+  }
+  d += " Z";
+
+  return (
+    <svg
+      viewBox={`0 0 ${w} ${h}`}
+      preserveAspectRatio="none"
+      className="h-full w-full"
+    >
+      <path d={d} fill={fill} />
+      <line x1="0" y1={mid} x2={w} y2={mid} stroke="rgba(56,189,248,0.12)" strokeWidth="0.5" />
+    </svg>
+  );
 }
 
 function renderToolIcon(tool: TimelineTool | "delete") {
@@ -559,11 +586,13 @@ export default function Timeline({
                       }`}
                       style={{ left: `${leftPercent}%`, width: `${widthPercent}%`, minWidth: 78 }}
                     >
-                      <div className="flex h-full items-center gap-[2px] overflow-hidden px-3 py-3">
+                      <div className="h-full overflow-hidden">
                         {waveform.length > 0 ? (
-                          renderWaveform(waveform)
+                          <WaveformSvg waveform={waveform} isSelected={isSelected} />
                         ) : (
-                          <div className="h-px w-full bg-sky-200/28" />
+                          <div className="flex h-full items-center px-3">
+                            <div className="h-px w-full bg-sky-200/28" />
+                          </div>
                         )}
                       </div>
                     </div>
