@@ -37,6 +37,7 @@ interface DockContext {
     isRetranscribing?: boolean;
     selection: TranscriptSelection | null;
     activeRange?: { startTime: number; endTime: number } | null;
+    timelineSourceRanges: Array<{ startTime: number; endTime: number }>;
     onSeek: (time: number) => void;
     onRetranscribe?: () => void;
     onSelectionChange: (selection: TranscriptSelection | null) => void;
@@ -185,7 +186,7 @@ export const dockFeatureManifests: DockFeatureManifest[] = [
               continue to function without an API key.
             </div>
           )}
-          <CommandInput onSubmit={ai.onSubmit} isProcessing={ai.isProcessing || !ai.enabled} lastExplanation={ai.lastExplanation} />
+          <CommandInput onSubmit={ai.onSubmit} isProcessing={ai.isProcessing} disabled={!ai.enabled} lastExplanation={ai.lastExplanation} />
         </div>
       </div>
     ),
@@ -203,6 +204,7 @@ export const dockFeatureManifests: DockFeatureManifest[] = [
         isRetranscribing={transcript.isRetranscribing}
         selection={transcript.selection}
         activeRange={transcript.activeRange}
+        timelineSourceRanges={transcript.timelineSourceRanges}
         onSeek={transcript.onSeek}
         onRetranscribe={transcript.onRetranscribe}
         onSelectionChange={transcript.onSelectionChange}

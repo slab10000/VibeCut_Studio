@@ -51,8 +51,9 @@ pub async fn ai_edit_command(
     command: String,
     transcript: serde_json::Value,
     timeline: serde_json::Value,
+    pauses: serde_json::Value,
 ) -> Result<EditCommandResponse, String> {
-    workflows::ai_edit_command(command, transcript, timeline).await
+    workflows::ai_edit_command(command, transcript, timeline, pauses).await
 }
 
 #[tauri::command]

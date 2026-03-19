@@ -191,7 +191,7 @@ export default function EditorShell() {
         setLeftPanelWidth(clamp(drag.startWidth + (e.clientX - drag.startX), 200, 520));
       } else if (drag.panel === "right") {
         setRightPanelWidth(clamp(drag.startWidth - (e.clientX - drag.startX), 220, 520));
-      } else {
+      } else if (drag.panel === "timeline") {
         setTimelineHeightPreference(
           clamp(drag.startHeight - (e.clientY - drag.startY), minimumTimelineHeight, maxTimelineHeight)
         );
@@ -348,6 +348,14 @@ export default function EditorShell() {
         : null,
     [selectedTimelineClip, transcriptSourceClipId]
   );
+
+  const timelineSourceRanges = useMemo(() => {
+    if (!transcriptSourceClipId) return [];
+    return timeline.clips
+      .filter((clip) => clip.type === "video" && clip.sourceClipId === transcriptSourceClipId)
+      .map((clip) => ({ startTime: clip.sourceStartTime, endTime: clip.sourceEndTime }))
+      .sort((a, b) => a.startTime - b.startTime);
+  }, [timeline.clips, transcriptSourceClipId]);
 
   const transcriptPauses = useMemo(() => {
     if (!transcriptClip) return [] as PauseRange[];
@@ -818,10 +826,12 @@ export default function EditorShell() {
   const handleEditCommand = useCallback(async (command: string) => {
     setLastExplanation(null);
     const transcriptSegments = libraryClips.flatMap((clip) => clip.transcriptSegments);
+    const pauseRanges = libraryClips.flatMap((clip) => clip.pauseRanges);
     const job = await enqueueAiEditMutation.mutateAsync({
       command,
       transcript: transcriptSegments,
       timeline: timeline.clips,
+      pauses: pauseRanges,
     });
     setPendingAiEditJobId(job.id);
   }, [enqueueAiEditMutation, libraryClips, setLastExplanation, setPendingAiEditJobId, timeline.clips]);
@@ -1131,7 +1141,7 @@ export default function EditorShell() {
         </div>
       )}
 
-      <header className="flex items-center justify-between border-b border-white/8 bg-[#111215] px-5 py-3">
+      <header data-tauri-drag-region className="flex items-center justify-between border-b border-white/8 bg-[#111215] py-3 pl-[88px] pr-5">
         <div className="flex items-center gap-4">
           <div>
             <p className="text-[10px] uppercase tracking-[0.24em] text-white/28">Workspace</p>
@@ -1329,6 +1339,7 @@ export default function EditorShell() {
                 isRetranscribing: isTranscriptProcessing,
                 selection: transcriptSelection,
                 activeRange: selectedTranscriptRange,
+                timelineSourceRanges,
                 onSeek: handleTranscriptSeek,
                 onRetranscribe: handleRetranscribe,
                 onSelectionChange: (selection: TranscriptSelection | null) => setTranscriptSelection(selection),

@@ -834,7 +834,7 @@ pub fn ai_status() -> Value {
     })
 }
 
-pub fn enqueue_ai_edit(app: AppHandle, state: AppState, command: String, transcript: Value, timeline: Value) -> Result<JobRecord, String> {
+pub fn enqueue_ai_edit(app: AppHandle, state: AppState, command: String, transcript: Value, timeline: Value, pauses: Value) -> Result<JobRecord, String> {
     let target_id = Uuid::new_v4().to_string();
     let job = create_job(
         "ai.edit",
@@ -855,7 +855,7 @@ pub fn enqueue_ai_edit(app: AppHandle, state: AppState, command: String, transcr
         let running_job = mark_job_running(&queued_job, 0.2, Some("Planning AI edit...".to_string()));
         let _ = emit_job_update(&app_handle, &state.database, &running_job);
 
-        match ai_edit_command(command, transcript, timeline).await {
+        match ai_edit_command(command, transcript, timeline, pauses).await {
             Ok(response) => {
                 let complete_job = mark_job_complete(
                     &running_job,
@@ -1123,14 +1123,18 @@ pub async fn ai_generate_transition(
     })
 }
 
-pub async fn ai_edit_command(command: String, transcript: Value, timeline: Value) -> Result<EditCommandResponse, String> {
+pub async fn ai_edit_command(command: String, transcript: Value, timeline: Value, pauses: Value) -> Result<EditCommandResponse, String> {
     let system_prompt = r#"You are a video editing AI assistant. Interpret the user's natural language request and convert it into structured sequence operations.
 
-The sequence can contain multiple source clips. Every transcript segment includes a sourceClipId. Every timeline clip includes its sequence index and the source clip/time window it uses.
+The sequence can contain multiple source clips. Every transcript segment and pause range includes a sourceClipId. Every timeline clip includes its sequence index and the source clip/time window it uses.
+
+PAUSE RANGES: Each pause range has { id, sourceClipId, startTime, endTime, duration }. These are machine-detected silences in the audio. Use them directly when the user asks to remove pauses, silence, or dead air.
+
+TAKES: A "take" is a repeated attempt at the same content. Identify takes by looking for repeated or similar phrases in the transcript segments. "First take", "second take", etc. refers to these repetitions in order.
 
 Available operation types:
-- "remove_time_range": remove spoken content inside a specific source clip. Must include sourceClipId, startTime, endTime.
-- "keep_only_ranges": rebuild the sequence using only specific source ranges. Must include a ranges array of {sourceClipId, startTime, endTime}.
+- "remove_time_range": remove a time window from a specific source clip. Must include sourceClipId, startTime, endTime. Use for removing pauses (use pause range times), filler words, or unwanted segments.
+- "keep_only_ranges": rebuild the sequence keeping only the specified source ranges. Must include a ranges array of {sourceClipId, startTime, endTime}. Use when the user wants to keep a specific take or section.
 - "insert_image": generate a still image and insert it after a sequence time. Must include prompt, afterTime, duration.
 - "reorder": move an existing sequence item by index. Must include fromIndex and toIndex.
 
@@ -1146,15 +1150,20 @@ Return ONLY valid JSON with this shape:
 }
 
 Rules:
+- For "remove pauses" / "remove silence" / "tighten" / "snappy": emit one remove_time_range operation per pause range.
+- For "keep the Nth take" / "use take N": use keep_only_ranges with the time window of that take.
+- For "remove filler words" (um, uh, like, you know): emit remove_time_range for each filler word's time window from the transcript.
 - Be conservative and preserve meaning unless the user explicitly asks for aggressive edits.
 - Prefer the smallest set of operations that satisfies the request.
 - Use reorder only when the user clearly wants sequence order changed.
-- When referencing transcript content, always ground the operation in sourceClipId + timestamps.
+- Always ground operations in sourceClipId + timestamps from the provided data.
 - Do not return markdown fences or any extra prose."#;
 
+    let pauses_json = serde_json::to_string_pretty(&pauses).unwrap_or_default();
     let user_message = format!(
-        "{system_prompt}\n\nCurrent transcript segments:\n{}\n\nCurrent timeline clips:\n{}\n\nUser command: \"{command}\"",
+        "{system_prompt}\n\nCurrent transcript segments:\n{}\n\nDetected pause ranges:\n{}\n\nCurrent timeline clips:\n{}\n\nUser command: \"{command}\"",
         serde_json::to_string_pretty(&transcript).unwrap_or_default(),
+        pauses_json,
         serde_json::to_string_pretty(&timeline).unwrap_or_default(),
     );
 

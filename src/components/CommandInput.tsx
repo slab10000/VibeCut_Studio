@@ -4,10 +4,11 @@ import { useEffect, useRef, useState } from "react";
 interface CommandInputProps {
   onSubmit: (command: string) => void;
   isProcessing: boolean;
+  disabled?: boolean;
   lastExplanation?: string | null;
 }
 
-export default function CommandInput({ onSubmit, isProcessing, lastExplanation }: CommandInputProps) {
+export default function CommandInput({ onSubmit, isProcessing, disabled, lastExplanation }: CommandInputProps) {
   const [value, setValue] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -19,8 +20,10 @@ export default function CommandInput({ onSubmit, isProcessing, lastExplanation }
     textarea.style.height = `${Math.min(textarea.scrollHeight, 240)}px`;
   }, [value]);
 
+  const isBlocked = isProcessing || disabled;
+
   const handleSubmit = () => {
-    if (value.trim() && !isProcessing) {
+    if (value.trim() && !isBlocked) {
       onSubmit(value.trim());
       setValue("");
     }
@@ -40,13 +43,13 @@ export default function CommandInput({ onSubmit, isProcessing, lastExplanation }
               handleSubmit();
             }
           }}
-          disabled={isProcessing}
+          disabled={isBlocked}
           rows={4}
           className="min-h-28 w-full resize-none overflow-y-auto rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm leading-6 text-white placeholder-white/25 focus:border-violet-500/50 focus:outline-none disabled:opacity-50"
         />
         <button
           onClick={handleSubmit}
-          disabled={isProcessing || !value.trim()}
+          disabled={isBlocked || !value.trim()}
           className="flex self-end items-center gap-2 rounded-xl bg-violet-600 px-5 py-3 text-sm font-medium text-white transition-colors hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {isProcessing ? (

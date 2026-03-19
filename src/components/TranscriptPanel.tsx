@@ -11,6 +11,7 @@ interface TranscriptPanelProps {
   isRetranscribing?: boolean;
   selection: TranscriptSelection | null;
   activeRange?: { startTime: number; endTime: number } | null;
+  timelineSourceRanges?: Array<{ startTime: number; endTime: number }>;
   onSeek: (time: number) => void;
   onRetranscribe?: () => void;
   onSelectionChange: (selection: TranscriptSelection | null) => void;
@@ -76,6 +77,7 @@ export default function TranscriptPanel({
   isRetranscribing,
   selection,
   activeRange,
+  timelineSourceRanges = [],
   onSeek,
   onRetranscribe,
   onSelectionChange,
@@ -140,6 +142,20 @@ export default function TranscriptPanel({
       return accumulator;
     }, []);
   }, [segments]);
+
+  const hasTimelineContext = timelineSourceRanges.length > 0;
+
+  const segmentInTimeline = useMemo(() => {
+    if (!hasTimelineContext) return null;
+    const map = new Map<string, boolean>();
+    for (const segment of segments) {
+      const overlaps = timelineSourceRanges.some(
+        (range) => segment.endTime > range.startTime && segment.startTime < range.endTime
+      );
+      map.set(segment.id, overlaps);
+    }
+    return map;
+  }, [hasTimelineContext, segments, timelineSourceRanges]);
 
   const hasBatchOnlyRegions = useMemo(
     () => segments.some((segment) => !segment.wordEditCapable),
@@ -353,12 +369,15 @@ export default function TranscriptPanel({
               activeRange &&
               segment.endTime > activeRange.startTime &&
               segment.startTime < activeRange.endTime;
+            const isRemovedFromTimeline = segmentInTimeline !== null && !segmentInTimeline.get(segment.id);
 
             return (
               <div
                 key={segment.id}
                 className={`border-b border-white/[0.05] px-4 py-3 transition ${
-                  isActive
+                  isRemovedFromTimeline
+                    ? "opacity-30"
+                    : isActive
                     ? "bg-sky-400/10"
                     : inSelectedRange
                     ? "bg-white/[0.035]"
@@ -378,7 +397,12 @@ export default function TranscriptPanel({
                           {Math.round(searchScore * 100)}%
                         </span>
                       )}
-                      {inSelectedRange && (
+                      {isRemovedFromTimeline && (
+                        <span className="rounded-full bg-red-400/10 px-2 py-0.5 text-red-300">
+                          removed
+                        </span>
+                      )}
+                      {!isRemovedFromTimeline && inSelectedRange && (
                         <span className="rounded-full bg-sky-400/10 px-2 py-0.5 text-sky-200">
                           in sequence clip
                         </span>
@@ -400,10 +424,17 @@ export default function TranscriptPanel({
                   </button>
                 </div>
 
-                <div className="mt-2 text-sm leading-7 text-white/80">
+                <div className={`mt-2 text-sm leading-7 ${isRemovedFromTimeline ? "text-white/30 line-through decoration-white/20" : "text-white/80"}`}>
                   {words.map((word, index) => {
                     const isSelected = selection?.wordIds.includes(word.wordId) ?? false;
                     const isActiveWord = word.wordId === activeWordId;
+                    const isWordInTimeline = !hasTimelineContext || timelineSourceRanges.some(
+                      (range) => {
+                        const wStart = word.startTime ?? word.segmentStartTime;
+                        const wEnd = word.endTime ?? word.segmentEndTime;
+                        return wEnd > range.startTime && wStart < range.endTime;
+                      }
+                    );
                     return (
                       <span key={word.wordId}>
                         <span
@@ -412,6 +443,8 @@ export default function TranscriptPanel({
                               ? "bg-sky-400/30"
                               : isSelected
                               ? "bg-violet-400/30"
+                              : !isWordInTimeline && !isRemovedFromTimeline
+                              ? "text-white/30 line-through decoration-white/20"
                               : ""
                           }`}
                           data-word-id={word.wordId}

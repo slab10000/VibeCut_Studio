@@ -12,6 +12,7 @@ use state::AppState;
 use tauri::Manager;
 
 fn main() {
+    let _ = dotenvy::dotenv();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {

@@ -15,8 +15,9 @@ pub fn ai_enqueue_edit_command(
     command: String,
     transcript: Value,
     timeline: Value,
+    pauses: Value,
 ) -> Result<JobRecord, String> {
-    workflows::enqueue_ai_edit(app, state.inner().clone(), command, transcript, timeline)
+    workflows::enqueue_ai_edit(app, state.inner().clone(), command, transcript, timeline, pauses)
 }
 
 #[tauri::command]

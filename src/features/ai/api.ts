@@ -13,12 +13,14 @@ import { queryKeys } from "@/shared/query/keys";
 export async function enqueueAiEditCommand(
   command: string,
   transcript: unknown,
-  timeline: unknown
+  timeline: unknown,
+  pauses: unknown
 ): Promise<JobRecord> {
   return desktopInvoke<JobRecord>("ai_enqueue_edit_command", {
     command,
     transcript: transcript ?? [],
     timeline: timeline ?? [],
+    pauses: pauses ?? [],
   });
 }
 
@@ -33,8 +35,8 @@ export function useEnqueueAiEditMutation() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: ({ command, transcript, timeline }: { command: string; transcript: unknown; timeline: unknown }) =>
-      enqueueAiEditCommand(command, transcript, timeline),
+    mutationFn: ({ command, transcript, timeline, pauses }: { command: string; transcript: unknown; timeline: unknown; pauses: unknown }) =>
+      enqueueAiEditCommand(command, transcript, timeline, pauses),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.jobs });
     },
