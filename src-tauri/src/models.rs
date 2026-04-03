@@ -2,6 +2,23 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TranscriptMetadata {
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub device: Option<String>,
+    pub compute_type: Option<String>,
+    pub language: Option<String>,
+    pub language_confidence: Option<f64>,
+    pub alignment_mode: Option<String>,
+    pub language_locked: Option<bool>,
+    pub low_confidence_language: Option<bool>,
+    pub vad_onset: Option<f64>,
+    pub vad_offset: Option<f64>,
+    pub audio_stream_offset: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TranscriptWord {
     pub id: String,
     pub source_clip_id: String,
@@ -11,6 +28,8 @@ pub struct TranscriptWord {
     pub end_time: f64,
     pub confidence: Option<f64>,
     pub aligned: bool,
+    pub timing_mode: String,
+    pub editable: bool,
     pub start_sample: Option<i64>,
     pub end_sample: Option<i64>,
 }
@@ -23,6 +42,7 @@ pub struct TranscriptSegment {
     pub start_time: f64,
     pub end_time: f64,
     pub text: String,
+    pub raw_text: String,
     pub words: Vec<TranscriptWord>,
     pub alignment_source: Option<String>,
     pub word_edit_capable: bool,
@@ -51,6 +71,7 @@ pub struct MediaAsset {
     pub transcript_status: String,
     pub embedding_status: String,
     pub transcript_segments: Vec<TranscriptSegment>,
+    pub transcript_metadata: Option<TranscriptMetadata>,
     pub pause_ranges: Vec<PauseRange>,
     pub embeddings_ready: bool,
     pub waveform: Vec<f64>,

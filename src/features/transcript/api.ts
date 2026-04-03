@@ -4,6 +4,19 @@ import { desktopInvoke, isTauriRuntime } from "@/shared/desktop/transport";
 import { queryKeys } from "@/shared/query/keys";
 import { createPreviewUrl } from "@/features/library/api";
 
+export interface TranscriptEnqueueInput {
+  assetId: string;
+  language?: string | null;
+  discardManualCorrections?: boolean;
+}
+
+export interface ManualWordTimingInput {
+  assetId: string;
+  wordId: string;
+  startTime: number;
+  endTime: number;
+}
+
 function hydrateAsset(asset: MediaAsset): MediaAsset {
   return {
     ...asset,
@@ -17,8 +30,21 @@ export async function getTranscript(assetId: string): Promise<MediaAsset | null>
   return hydrateAsset(asset);
 }
 
-export async function enqueueTranscript(assetId: string): Promise<JobRecord> {
-  return desktopInvoke<JobRecord>("transcript_enqueue", { assetId });
+export async function enqueueTranscript(input: TranscriptEnqueueInput): Promise<JobRecord> {
+  return desktopInvoke<JobRecord>("transcript_enqueue", {
+    assetId: input.assetId,
+    language: input.language ?? undefined,
+    discardManualCorrections: input.discardManualCorrections ?? false,
+  });
+}
+
+export async function updateTranscriptWordTiming(input: ManualWordTimingInput): Promise<MediaAsset> {
+  return desktopInvoke<MediaAsset>("transcript_update_word_timing", {
+    assetId: input.assetId,
+    wordId: input.wordId,
+    startTime: input.startTime,
+    endTime: input.endTime,
+  }).then(hydrateAsset);
 }
 
 export async function searchTranscript(query: string): Promise<SearchHit[]> {
@@ -39,7 +65,7 @@ export function useEnqueueTranscriptMutation() {
 
   return useMutation({
     mutationFn: enqueueTranscript,
-    onMutate: async (assetId) => {
+    onMutate: async ({ assetId }) => {
       const markPending = (asset: MediaAsset | null | undefined) => {
         if (!asset) return asset ?? null;
         return hydrateAsset({
@@ -57,13 +83,26 @@ export function useEnqueueTranscriptMutation() {
         markPending(current)
       );
     },
-    onSuccess: (_job, assetId) => {
+    onSuccess: (_job, { assetId }) => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.jobs });
       void queryClient.invalidateQueries({ queryKey: queryKeys.transcript(assetId) });
       void queryClient.invalidateQueries({ queryKey: queryKeys.library });
     },
-    onError: (_error, assetId) => {
+    onError: (_error, { assetId }) => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.jobs });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.transcript(assetId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.library });
+    },
+  });
+}
+
+export function useUpdateTranscriptWordTimingMutation() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: updateTranscriptWordTiming,
+    onSuccess: (asset, { assetId }) => {
+      queryClient.setQueryData(queryKeys.transcript(assetId), asset);
       void queryClient.invalidateQueries({ queryKey: queryKeys.transcript(assetId) });
       void queryClient.invalidateQueries({ queryKey: queryKeys.library });
     },

@@ -55,6 +55,7 @@ fn main() {
             tauri_commands::mutations::library_import_paths,
             tauri_commands::mutations::library_remove,
             tauri_commands::mutations::timeline_apply_patch,
+            tauri_commands::mutations::transcript_update_word_timing,
             tauri_commands::jobs::transcript_enqueue,
             tauri_commands::jobs::ai_enqueue_edit_command,
             tauri_commands::jobs::export_enqueue,

@@ -148,7 +148,7 @@ pub fn ffprobe_json(path: &Path) -> anyhow::Result<Value> {
             "-v",
             "error",
             "-show_entries",
-            "format=duration:stream=codec_type,codec_name,width,height",
+            "format=duration,start_time:stream=codec_type,codec_name,width,height,start_time",
             "-print_format",
             "json",
             &path.to_string_lossy(),

@@ -27,16 +27,19 @@ fn api_key() -> Result<String, String> {
         })
 }
 
-pub async fn request_transcription(source_path: String, display_name: String) -> Result<Value, String> {
+pub async fn request_transcription(source_path: String, display_name: String, language: Option<String>) -> Result<Value, String> {
     let sidecar_url = std::env::var("LOCAL_ALIGNER_URL").unwrap_or_else(|_| "http://127.0.0.1:8765".to_string());
+    let mut form = reqwest::multipart::Form::new()
+        .text("source_path", source_path)
+        .text("display_name", display_name);
+
+    if let Some(language) = language.filter(|value| !value.trim().is_empty()) {
+        form = form.text("language", language);
+    }
 
     let response = reqwest::Client::new()
         .post(format!("{sidecar_url}/transcribe"))
-        .multipart(
-            reqwest::multipart::Form::new()
-                .text("source_path", source_path)
-                .text("display_name", display_name),
-        )
+        .multipart(form)
         .send()
         .await
         .map_err(|error| format!("Failed to reach the transcription sidecar: {error}"))?;

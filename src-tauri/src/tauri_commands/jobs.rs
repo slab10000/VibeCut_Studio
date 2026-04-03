@@ -4,8 +4,20 @@ use tauri::{AppHandle, State};
 use crate::{application::workflows, models::{JobRecord, SequenceItem}, state::AppState};
 
 #[tauri::command]
-pub fn transcript_enqueue(app: AppHandle, state: State<'_, AppState>, asset_id: String) -> Result<JobRecord, String> {
-    workflows::enqueue_transcript(app, state.inner().clone(), asset_id)
+pub fn transcript_enqueue(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    asset_id: String,
+    language: Option<String>,
+    discard_manual_corrections: Option<bool>,
+) -> Result<JobRecord, String> {
+    workflows::enqueue_transcript(
+        app,
+        state.inner().clone(),
+        asset_id,
+        language,
+        discard_manual_corrections.unwrap_or(false),
+    )
 }
 
 #[tauri::command]

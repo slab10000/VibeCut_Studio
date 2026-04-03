@@ -4,7 +4,7 @@ use anyhow::Context;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use crate::models::{
-    JobRecord, MediaAsset, PauseRange, ProjectSnapshot, ProjectSummary, SequenceItem, TranscriptSegment,
+    JobRecord, MediaAsset, PauseRange, ProjectSnapshot, ProjectSummary, SequenceItem, TranscriptMetadata, TranscriptSegment,
     TranscriptWord,
 };
 
@@ -20,6 +20,25 @@ impl Database {
 
     fn connection(&self) -> anyhow::Result<Connection> {
         Connection::open(&self.db_path).with_context(|| format!("failed to open {}", self.db_path.display()))
+    }
+
+    fn column_exists(connection: &Connection, table: &str, column: &str) -> anyhow::Result<bool> {
+        let pragma = format!("PRAGMA table_info({table})");
+        let mut statement = connection.prepare(&pragma)?;
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(columns.iter().any(|name| name == column))
+    }
+
+    fn ensure_column(connection: &Connection, table: &str, column: &str, definition: &str) -> anyhow::Result<()> {
+        if Self::column_exists(connection, table, column)? {
+            return Ok(());
+        }
+
+        let statement = format!("ALTER TABLE {table} ADD COLUMN {column} {definition}");
+        connection.execute(&statement, [])?;
+        Ok(())
     }
 
     pub fn initialize(&self) -> anyhow::Result<()> {
@@ -46,6 +65,7 @@ impl Database {
               status TEXT NOT NULL,
               transcript_status TEXT NOT NULL,
               embedding_status TEXT NOT NULL,
+              transcript_metadata TEXT NOT NULL DEFAULT '{}',
               transcript_segments TEXT NOT NULL,
               pause_ranges TEXT NOT NULL,
               waveform TEXT NOT NULL,
@@ -89,6 +109,7 @@ impl Database {
               start_time REAL NOT NULL,
               end_time REAL NOT NULL,
               text TEXT NOT NULL,
+              raw_text TEXT NOT NULL DEFAULT '',
               alignment_source TEXT,
               word_edit_capable INTEGER NOT NULL
             );
@@ -102,6 +123,8 @@ impl Database {
               end_time REAL NOT NULL,
               confidence REAL,
               aligned INTEGER NOT NULL,
+              timing_mode TEXT NOT NULL DEFAULT 'exact',
+              editable INTEGER NOT NULL DEFAULT 1,
               start_sample INTEGER,
               end_sample INTEGER
             );
@@ -130,6 +153,36 @@ impl Database {
               updated_at INTEGER NOT NULL
             );
             "#,
+        )?;
+
+        Self::ensure_column(&connection, "media_assets", "transcript_metadata", "TEXT NOT NULL DEFAULT '{}'")?;
+        Self::ensure_column(&connection, "transcript_segments", "raw_text", "TEXT NOT NULL DEFAULT ''")?;
+        Self::ensure_column(&connection, "transcript_words", "timing_mode", "TEXT NOT NULL DEFAULT 'exact'")?;
+        Self::ensure_column(&connection, "transcript_words", "editable", "INTEGER NOT NULL DEFAULT 1")?;
+
+        connection.execute(
+            "UPDATE media_assets
+             SET transcript_metadata = '{}'
+             WHERE transcript_metadata IS NULL OR trim(transcript_metadata) = ''",
+            [],
+        )?;
+        connection.execute(
+            "UPDATE transcript_segments
+             SET raw_text = text
+             WHERE raw_text IS NULL OR raw_text = ''",
+            [],
+        )?;
+        connection.execute(
+            "UPDATE transcript_words
+             SET timing_mode = CASE WHEN aligned > 0 THEN 'exact' ELSE 'approximate' END
+             WHERE timing_mode IS NULL OR trim(timing_mode) = ''",
+            [],
+        )?;
+        connection.execute(
+            "UPDATE transcript_words
+             SET editable = CASE WHEN timing_mode = 'approximate' THEN 0 ELSE 1 END
+             WHERE editable IS NULL",
+            [],
         )?;
 
         if connection
@@ -195,7 +248,7 @@ impl Database {
         let mut media_statement = connection.prepare(
             "SELECT
               id, source_path, fingerprint, file_name, duration, duration_ms, status,
-              transcript_status, embedding_status, transcript_segments, pause_ranges, waveform,
+              transcript_status, embedding_status, transcript_metadata, transcript_segments, pause_ranges, waveform,
               preview_path, thumbnail_path, waveform_path, proxy_path, video_codec, audio_codec,
               width, height, has_audio, error
              FROM media_assets
@@ -217,16 +270,17 @@ impl Database {
                     row.get::<_, String>(9)?,
                     row.get::<_, String>(10)?,
                     row.get::<_, String>(11)?,
-                    row.get::<_, Option<String>>(12)?,
+                    row.get::<_, String>(12)?,
                     row.get::<_, Option<String>>(13)?,
                     row.get::<_, Option<String>>(14)?,
                     row.get::<_, Option<String>>(15)?,
                     row.get::<_, Option<String>>(16)?,
                     row.get::<_, Option<String>>(17)?,
-                    row.get::<_, Option<i64>>(18)?,
+                    row.get::<_, Option<String>>(18)?,
                     row.get::<_, Option<i64>>(19)?,
                     row.get::<_, Option<i64>>(20)?,
-                    row.get::<_, Option<String>>(21)?,
+                    row.get::<_, Option<i64>>(21)?,
+                    row.get::<_, Option<String>>(22)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -243,6 +297,7 @@ impl Database {
             status,
             transcript_status,
             embedding_status,
+            transcript_metadata,
             transcript_segments_blob,
             pause_ranges_blob,
             waveform,
@@ -275,6 +330,7 @@ impl Database {
                 status,
                 transcript_status,
                 embedding_status: embedding_status.clone(),
+                transcript_metadata: serde_json::from_str::<TranscriptMetadata>(&transcript_metadata).ok(),
                 transcript_segments,
                 pause_ranges,
                 embeddings_ready: embedding_status == "embedding_ready",
@@ -352,12 +408,12 @@ impl Database {
             tx.execute(
                 "INSERT INTO media_assets (
                   id, project_id, source_path, fingerprint, file_name, duration, duration_ms, status,
-                  transcript_status, embedding_status, transcript_segments, pause_ranges, waveform,
+                  transcript_status, embedding_status, transcript_metadata, transcript_segments, pause_ranges, waveform,
                   preview_path, thumbnail_path, waveform_path, proxy_path, video_codec, audio_codec,
                   width, height, has_audio, error
                  ) VALUES (
                   ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
-                  ?19, ?20, ?21, ?22, ?23
+                  ?19, ?20, ?21, ?22, ?23, ?24
                  )
                  ON CONFLICT(id) DO UPDATE SET
                   source_path = excluded.source_path,
@@ -368,6 +424,7 @@ impl Database {
                   status = excluded.status,
                   transcript_status = excluded.transcript_status,
                   embedding_status = excluded.embedding_status,
+                  transcript_metadata = excluded.transcript_metadata,
                   transcript_segments = excluded.transcript_segments,
                   pause_ranges = excluded.pause_ranges,
                   waveform = excluded.waveform,
@@ -392,6 +449,7 @@ impl Database {
                     asset.status,
                     asset.transcript_status,
                     asset.embedding_status,
+                    serde_json::to_string(&asset.transcript_metadata)?,
                     serde_json::to_string(&asset.transcript_segments)?,
                     serde_json::to_string(&asset.pause_ranges)?,
                     serde_json::to_string(&asset.waveform)?,
@@ -584,7 +642,7 @@ impl Database {
         asset_id: &str,
     ) -> anyhow::Result<Vec<TranscriptSegment>> {
         let mut segment_statement = connection.prepare(
-            "SELECT id, start_time, end_time, text, alignment_source, word_edit_capable
+            "SELECT id, start_time, end_time, text, raw_text, alignment_source, word_edit_capable
              FROM transcript_segments
              WHERE source_clip_id = ?1
              ORDER BY start_time ASC, rowid ASC",
@@ -597,17 +655,18 @@ impl Database {
                     row.get::<_, f64>(1)?,
                     row.get::<_, f64>(2)?,
                     row.get::<_, String>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, i64>(5)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, i64>(6)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(segment_statement);
 
         let mut segments = Vec::with_capacity(segment_rows.len());
-        for (segment_id, start_time, end_time, text, alignment_source, word_edit_capable) in segment_rows {
+        for (segment_id, start_time, end_time, text, raw_text, alignment_source, word_edit_capable) in segment_rows {
             let mut word_statement = connection.prepare(
-                "SELECT id, text, start_time, end_time, confidence, aligned, start_sample, end_sample
+                "SELECT id, text, start_time, end_time, confidence, aligned, timing_mode, editable, start_sample, end_sample
                  FROM transcript_words
                  WHERE segment_id = ?1
                  ORDER BY start_time ASC, rowid ASC",
@@ -624,8 +683,10 @@ impl Database {
                         end_time: word_row.get(3)?,
                         confidence: word_row.get(4)?,
                         aligned: word_row.get::<_, i64>(5)? > 0,
-                        start_sample: word_row.get(6)?,
-                        end_sample: word_row.get(7)?,
+                        timing_mode: word_row.get(6)?,
+                        editable: word_row.get::<_, i64>(7)? > 0,
+                        start_sample: word_row.get(8)?,
+                        end_sample: word_row.get(9)?,
                     })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -637,6 +698,7 @@ impl Database {
                 start_time,
                 end_time,
                 text,
+                raw_text,
                 words,
                 alignment_source,
                 word_edit_capable: word_edit_capable > 0,
@@ -677,14 +739,15 @@ impl Database {
         for segment in &asset.transcript_segments {
             tx.execute(
                 "INSERT INTO transcript_segments (
-                  id, source_clip_id, start_time, end_time, text, alignment_source, word_edit_capable
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                  id, source_clip_id, start_time, end_time, text, raw_text, alignment_source, word_edit_capable
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     segment.id,
                     asset.id,
                     segment.start_time,
                     segment.end_time,
                     segment.text,
+                    segment.raw_text,
                     segment.alignment_source,
                     if segment.word_edit_capable { 1 } else { 0 },
                 ],
@@ -694,8 +757,8 @@ impl Database {
                 tx.execute(
                     "INSERT INTO transcript_words (
                       id, source_clip_id, segment_id, text, start_time, end_time, confidence, aligned,
-                      start_sample, end_sample
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                      timing_mode, editable, start_sample, end_sample
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                     params![
                         word.id,
                         asset.id,
@@ -705,6 +768,8 @@ impl Database {
                         word.end_time,
                         word.confidence,
                         if word.aligned { 1 } else { 0 },
+                        word.timing_mode,
+                        if word.editable { 1 } else { 0 },
                         word.start_sample,
                         word.end_sample,
                     ],
@@ -766,6 +831,7 @@ impl Database {
                 status: String::new(),
                 transcript_status: String::new(),
                 embedding_status: String::new(),
+                transcript_metadata: None,
                 transcript_segments: segments,
                 pause_ranges: pauses,
                 embeddings_ready: false,

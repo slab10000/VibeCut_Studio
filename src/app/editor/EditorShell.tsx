@@ -19,7 +19,12 @@ import { useJobsQuery } from "@/features/jobs/api";
 import { usePlaybackStore } from "@/features/playback/store/playback-store";
 import { useCapabilitiesQuery, useProjectQuery } from "@/features/project/api";
 import { useSessionStore } from "@/features/session/store/session-store";
-import { searchTranscript, useEnqueueTranscriptMutation, useTranscriptQuery } from "@/features/transcript/api";
+import {
+  searchTranscript,
+  useEnqueueTranscriptMutation,
+  useTranscriptQuery,
+  useUpdateTranscriptWordTimingMutation,
+} from "@/features/transcript/api";
 import { useApplyTimelinePatchMutation, useTimelineQuery } from "@/features/timeline/api";
 import { useTimelineEditor } from "@/features/timeline/hooks/useTimelineEditor";
 import type {
@@ -45,6 +50,12 @@ const TIMELINE_PANEL_MIN_HEIGHT = 180;
 const TIMELINE_PANEL_AUTO_HEIGHT = 320;
 const TIMELINE_PANEL_MAX_HEIGHT = 520;
 const PANEL_RESIZE_HANDLE_HEIGHT = 4;
+
+interface PreviewSeekOptions {
+  forceSeek?: boolean;
+  waitForSeek?: boolean;
+  onSettled?: (actualTime: number) => void;
+}
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
@@ -152,6 +163,7 @@ export default function EditorShell() {
   const [rightPanelWidth, setRightPanelWidth] = useState(360);
   const [timelineHeightPreference, setTimelineHeightPreference] = useState<number | null>(null);
   const [maxTimelineHeight, setMaxTimelineHeight] = useState(320);
+  const [transcriptLanguageOverride, setTranscriptLanguageOverride] = useState("");
   type PanelDrag =
     | { panel: "left" | "right"; startX: number; startWidth: number }
     | { panel: "timeline"; startY: number; startHeight: number };
@@ -247,6 +259,7 @@ export default function EditorShell() {
   const removeMediaMutation = useRemoveMediaMutation();
   const applyTimelinePatchMutation = useApplyTimelinePatchMutation();
   const enqueueTranscriptMutation = useEnqueueTranscriptMutation();
+  const updateTranscriptWordTimingMutation = useUpdateTranscriptWordTimingMutation();
   const enqueueAiEditMutation = useEnqueueAiEditMutation();
   const enqueueExportMutation = useEnqueueExportMutation();
 
@@ -409,6 +422,15 @@ export default function EditorShell() {
     (job) => job.kind === "export" && (job.status === "queued" || job.status === "running")
   );
 
+  useEffect(() => {
+    const metadata = transcriptClip?.transcriptMetadata;
+    if (metadata?.languageLocked && metadata.language) {
+      setTranscriptLanguageOverride(metadata.language);
+      return;
+    }
+    setTranscriptLanguageOverride("");
+  }, [transcriptClip?.id]);
+
   const queueTranscription = useCallback(
     async (clipOrId: LibraryClip | string) => {
       const clipId = typeof clipOrId === "string" ? clipOrId : clipOrId.id;
@@ -420,7 +442,7 @@ export default function EditorShell() {
 
       transcriptionQueueRef.current.add(clipId);
       try {
-        await enqueueTranscriptMutation.mutateAsync(clipId);
+        await enqueueTranscriptMutation.mutateAsync({ assetId: clipId });
       } finally {
         transcriptionQueueRef.current.delete(clipId);
       }
@@ -428,26 +450,57 @@ export default function EditorShell() {
     [enqueueTranscriptMutation, libraryClips]
   );
 
-  const setVideoSource = useCallback((url: string, targetTime: number, autoplay: boolean) => {
+  const setVideoSource = useCallback((
+    url: string,
+    targetTime: number,
+    autoplay: boolean,
+    options: PreviewSeekOptions = {}
+  ) => {
     const video = videoRef.current;
     if (!video) return;
 
     const safeTargetTime = Math.max(0, targetTime);
+    const { forceSeek = false, waitForSeek = false, onSettled } = options;
+
+    const settle = () => {
+      onSettled?.(video.currentTime);
+    };
+
+    const maybeAutoplay = () => {
+      if (autoplay && video.paused) {
+        void video.play().catch(() => {
+          setIsPlaying(false);
+        });
+      }
+    };
 
     const seekAndPlay = () => {
       const apply = () => {
         try {
-          if (Math.abs(video.currentTime - safeTargetTime) > SEEK_TOLERANCE_SECONDS) {
+          const delta = Math.abs(video.currentTime - safeTargetTime);
+          const shouldSeek = forceSeek ? delta > 0.001 : delta > SEEK_TOLERANCE_SECONDS;
+
+          if (shouldSeek) {
+            if (waitForSeek || onSettled) {
+              video.addEventListener(
+                "seeked",
+                () => {
+                  maybeAutoplay();
+                  settle();
+                },
+                { once: true }
+              );
+            }
             video.currentTime = safeTargetTime;
+          } else {
+            settle();
           }
         } catch {
           return;
         }
 
-        if (autoplay && video.paused) {
-          void video.play().catch(() => {
-            setIsPlaying(false);
-          });
+        if (!(forceSeek && Math.abs(video.currentTime - safeTargetTime) > 0.001 && (waitForSeek || onSettled))) {
+          maybeAutoplay();
         }
       };
 
@@ -500,47 +553,86 @@ export default function EditorShell() {
   );
 
   const syncSourcePreview = useCallback(
-    (clip: LibraryClip | null, time: number, autoplay: boolean) => {
+    (clip: LibraryClip | null, time: number, autoplay: boolean, options: PreviewSeekOptions = {}) => {
       if (!clip?.previewUrl) {
         videoRef.current?.pause();
         setIsPlaying(false);
         return;
       }
 
-      setSourceTime(clamp(time, 0, clip.duration || 0));
-      setVideoSource(clip.previewUrl, clamp(time, 0, clip.duration || 0), autoplay);
+      const clampedTime = clamp(time, 0, clip.duration || 0);
+      if (!options.waitForSeek) {
+        setSourceTime(clampedTime);
+      }
+
+      setVideoSource(clip.previewUrl, clampedTime, autoplay, {
+        ...options,
+        onSettled: (actualTime) => {
+          if (options.waitForSeek) {
+            setSourceTime(clamp(actualTime, 0, clip.duration || 0));
+          }
+          options.onSettled?.(actualTime);
+        },
+      });
     },
     [setIsPlaying, setSourceTime, setVideoSource]
   );
 
   const applyEditOperations = useCallback(
     (data: EditCommandResponse) => {
+      console.info("[VibeCut AI] Applying edit:", data.explanation, "operations:", data.operations);
+
+      // Resolve sourceClipId: if Gemini returns an unknown ID but there's only one source clip,
+      // fall back to the single source clip's ID.
+      const availableSourceIds = new Set(timeline.clips.map((c) => c.sourceClipId).filter(Boolean));
+      const singleSourceId = availableSourceIds.size === 1 ? [...availableSourceIds][0] : null;
+
+      const resolveSourceClipId = (raw: string | undefined): string | undefined => {
+        if (raw && availableSourceIds.has(raw)) return raw;
+        if (raw && libraryClips.some((c) => c.id === raw)) return raw;
+        if (singleSourceId) {
+          console.warn(`[VibeCut AI] sourceClipId "${raw}" not found in timeline, falling back to "${singleSourceId}"`);
+          return singleSourceId;
+        }
+        return raw;
+      };
+
+      // Collect all remove_time_range operations into a single batch dispatch to avoid state issues
+      const removeRanges: Array<{ sourceClipId: string; startTime: number; endTime: number }> = [];
+      let applied = false;
+
       for (const operation of data.operations) {
+        console.info("[VibeCut AI] Processing op:", operation.type, operation);
+
         if (operation.type === "remove_time_range") {
-          if (operation.startTime === undefined || operation.endTime === undefined || !operation.sourceClipId) continue;
-          dispatchWithUndo({
-            type: "REMOVE_RANGES",
-            ranges: [
-              {
-                sourceClipId: operation.sourceClipId,
-                startTime: operation.startTime,
-                endTime: operation.endTime,
-              },
-            ],
-          });
+          if (operation.startTime === undefined || operation.endTime === undefined) {
+            console.warn("[VibeCut AI] Skipping remove_time_range: missing startTime or endTime", operation);
+            continue;
+          }
+          const sourceClipId = resolveSourceClipId(operation.sourceClipId);
+          if (!sourceClipId) {
+            console.warn("[VibeCut AI] Skipping remove_time_range: no sourceClipId", operation);
+            continue;
+          }
+          removeRanges.push({ sourceClipId, startTime: operation.startTime, endTime: operation.endTime });
           continue;
         }
 
         if (operation.type === "keep_only_ranges" && operation.ranges) {
           const nextClips = operation.ranges
-            .filter((range) => range.sourceClipId && range.endTime > range.startTime)
+            .filter((range) => range.endTime > range.startTime)
             .map((range) => {
-              const source = libraryClips.find((clip) => clip.id === range.sourceClipId);
-              return buildTimelineClip(range.sourceClipId!, range.startTime, range.endTime, source?.fileName);
-            });
+              const resolvedId = resolveSourceClipId(range.sourceClipId) || singleSourceId;
+              const source = libraryClips.find((clip) => clip.id === resolvedId);
+              return buildTimelineClip(resolvedId!, range.startTime, range.endTime, source?.fileName);
+            })
+            .filter((clip) => clip.sourceClipId);
 
           if (nextClips.length > 0) {
             dispatchWithUndo({ type: "APPLY_EDIT", clips: nextClips });
+            applied = true;
+          } else {
+            console.warn("[VibeCut AI] keep_only_ranges produced no valid clips", operation.ranges);
           }
           continue;
         }
@@ -555,13 +647,25 @@ export default function EditorShell() {
             fromIndex: operation.fromIndex,
             toIndex: operation.toIndex,
           });
+          applied = true;
         }
+      }
+
+      // Apply all accumulated remove_time_range operations in one dispatch
+      if (removeRanges.length > 0) {
+        console.info("[VibeCut AI] Applying", removeRanges.length, "remove_time_range operations in batch");
+        dispatchWithUndo({ type: "REMOVE_RANGES", ranges: removeRanges });
+        applied = true;
+      }
+
+      if (!applied) {
+        console.warn("[VibeCut AI] No operations were applied. Operations:", data.operations);
       }
 
       setLastExplanation(data.explanation);
       setMonitorMode("program");
     },
-    [dispatchWithUndo, libraryClips, setLastExplanation, setMonitorMode]
+    [dispatchWithUndo, libraryClips, setLastExplanation, setMonitorMode, timeline.clips]
   );
 
   const handleImportPaths = useCallback(async (paths: string[]) => {
@@ -762,13 +866,32 @@ export default function EditorShell() {
     setMonitorMode("program");
   }, [dispatchWithUndo, selectedTranscriptRange, setMonitorMode, transcriptPauses]);
 
-  const handleRetranscribe = useCallback(() => {
+  const handleRetranscribe = useCallback((options?: { discardManualCorrections?: boolean }) => {
     if (!transcriptClip || transcriptClip.hasAudio === false || isTranscriptProcessing) return;
     setTranscriptSelection(null);
-    void enqueueTranscriptMutation.mutateAsync(transcriptClip.id).catch((error) => {
+    const language = transcriptLanguageOverride.trim();
+    void enqueueTranscriptMutation.mutateAsync({
+      assetId: transcriptClip.id,
+      language: language || undefined,
+      discardManualCorrections: options?.discardManualCorrections ?? false,
+    }).catch((error) => {
       console.error("Failed to re-transcribe clip:", error);
     });
-  }, [enqueueTranscriptMutation, isTranscriptProcessing, setTranscriptSelection, transcriptClip]);
+  }, [enqueueTranscriptMutation, isTranscriptProcessing, setTranscriptSelection, transcriptClip, transcriptLanguageOverride]);
+
+  const handleSaveManualTiming = useCallback(async ({ wordId, startTime, endTime }: {
+    wordId: string;
+    startTime: number;
+    endTime: number;
+  }) => {
+    if (!transcriptClip) return;
+    await updateTranscriptWordTimingMutation.mutateAsync({
+      assetId: transcriptClip.id,
+      wordId,
+      startTime,
+      endTime,
+    });
+  }, [transcriptClip, updateTranscriptWordTimingMutation]);
 
   const handleMonitorSeek = useCallback((time: number) => {
     if (monitorMode === "program") {
@@ -789,7 +912,7 @@ export default function EditorShell() {
     setSelectedSourceClipId(transcriptClip.id);
     setSelectedTimelineClipId(null);
     setMonitorMode("source");
-    syncSourcePreview(transcriptClip, time, false);
+    syncSourcePreview(transcriptClip, time, false, { forceSeek: true, waitForSeek: true });
 
     // Also move the timeline playhead to the matching sequence position if this
     // source clip appears in the timeline at this source time.
@@ -1346,15 +1469,20 @@ export default function EditorShell() {
               transcript: {
                 clipName: transcriptClip?.fileName,
                 segments: transcriptClip?.transcriptSegments || [],
+                metadata: transcriptClip?.transcriptMetadata || null,
                 pauses: transcriptPauses,
                 currentTime: activeTranscriptTime,
                 canRetranscribe: Boolean(transcriptClip && transcriptClip.hasAudio !== false),
                 isRetranscribing: isTranscriptProcessing,
+                languageOverride: transcriptLanguageOverride,
                 selection: transcriptSelection,
                 activeRange: selectedTranscriptRange,
                 timelineSourceRanges,
+                isSavingManualTiming: updateTranscriptWordTimingMutation.isPending,
                 onSeek: handleTranscriptSeek,
                 onRetranscribe: handleRetranscribe,
+                onLanguageOverrideChange: setTranscriptLanguageOverride,
+                onSaveManualTiming: handleSaveManualTiming,
                 onSelectionChange: (selection: TranscriptSelection | null) => setTranscriptSelection(selection),
                 onRemoveSelection: handleRemoveTranscriptSelection,
                 onRemoveSegment: handleRemoveTranscriptSegment,

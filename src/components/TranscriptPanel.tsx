@@ -1,19 +1,24 @@
 "use client";
-import { useCallback, useEffect, useMemo, useRef } from "react";
-import { PauseRange, TranscriptSegment, TranscriptSelection } from "@/types";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { PauseRange, TranscriptMetadata, TranscriptSegment, TranscriptSelection, TranscriptTimingMode } from "@/types";
 
 interface TranscriptPanelProps {
   clipName?: string;
   segments: TranscriptSegment[];
+  metadata?: TranscriptMetadata | null;
   pauses: PauseRange[];
   currentTime: number;
   canRetranscribe?: boolean;
   isRetranscribing?: boolean;
+  languageOverride: string;
   selection: TranscriptSelection | null;
   activeRange?: { startTime: number; endTime: number } | null;
   timelineSourceRanges?: Array<{ startTime: number; endTime: number }>;
+  isSavingManualTiming?: boolean;
   onSeek: (time: number) => void;
-  onRetranscribe?: () => void;
+  onRetranscribe?: (options?: { discardManualCorrections?: boolean }) => void;
+  onLanguageOverrideChange: (value: string) => void;
+  onSaveManualTiming?: (input: { wordId: string; startTime: number; endTime: number }) => Promise<void>;
   onSelectionChange: (selection: TranscriptSelection | null) => void;
   onRemoveSelection: () => void;
   onRemoveSegment: (segmentId: string) => void;
@@ -30,16 +35,44 @@ interface DisplayWord {
   text: string;
   orderIndex: number;
   aligned: boolean;
+  timingMode: TranscriptTimingMode;
+  editable: boolean;
+  confidence?: number;
   startTime?: number;
   endTime?: number;
   segmentStartTime: number;
   segmentEndTime: number;
 }
 
+interface ManualWordDraft {
+  wordId: string;
+  text: string;
+  timingMode: TranscriptTimingMode;
+  startTime: number;
+  endTime: number;
+}
+
 function formatTime(seconds: number) {
   const mins = Math.floor(seconds / 60);
   const secs = Math.floor(seconds % 60);
   return `${mins}:${secs.toString().padStart(2, "0")}`;
+}
+
+function isFiniteNumber(value: number | undefined): value is number {
+  return Number.isFinite(value);
+}
+
+function midpoint(start: number, end: number) {
+  return start + (end - start) / 2;
+}
+
+function isSameBoundary(
+  leftContainer: Node,
+  leftOffset: number,
+  rightContainer: Node,
+  rightOffset: number
+) {
+  return leftContainer === rightContainer && leftOffset === rightOffset;
 }
 
 function tokenizeFallbackWords(segment: TranscriptSegment, startOrderIndex: number) {
@@ -55,6 +88,9 @@ function tokenizeFallbackWords(segment: TranscriptSegment, startOrderIndex: numb
         text: token,
         orderIndex: startOrderIndex + index,
         aligned: false,
+        timingMode: "approximate",
+        editable: false,
+        confidence: undefined,
         startTime: undefined,
         endTime: undefined,
         segmentStartTime: segment.startTime,
@@ -71,15 +107,20 @@ function getWordElement(node: EventTarget | null) {
 export default function TranscriptPanel({
   clipName,
   segments,
+  metadata,
   pauses,
   currentTime,
   canRetranscribe,
   isRetranscribing,
+  languageOverride,
   selection,
   activeRange,
   timelineSourceRanges = [],
+  isSavingManualTiming,
   onSeek,
   onRetranscribe,
+  onLanguageOverrideChange,
+  onSaveManualTiming,
   onSelectionChange,
   onRemoveSelection,
   onRemoveSegment,
@@ -90,6 +131,7 @@ export default function TranscriptPanel({
 }: TranscriptPanelProps) {
   const transcriptTextRef = useRef<HTMLDivElement>(null);
   const suppressSelectionSyncRef = useRef(false);
+  const [manualWordDraft, setManualWordDraft] = useState<ManualWordDraft | null>(null);
 
   const activeSegmentId = useMemo(() => {
     const active = segments.find((segment) => currentTime >= segment.startTime && currentTime < segment.endTime);
@@ -100,7 +142,7 @@ export default function TranscriptPanel({
     if (!activeSegmentId) return null;
     const segment = segments.find((s) => s.id === activeSegmentId);
     if (!segment) return null;
-    const alignedWords = segment.words.filter((w) => w.aligned && Number.isFinite(w.startTime));
+    const alignedWords = segment.words.filter((w) => w.timingMode !== "approximate" && Number.isFinite(w.startTime));
     if (alignedWords.length === 0) return null;
     // Exact match first
     const exact = alignedWords.find((w) => currentTime >= w.startTime && currentTime < w.endTime);
@@ -131,6 +173,9 @@ export default function TranscriptPanel({
               text: word.text,
               orderIndex: nextOrderIndex + index,
               aligned: word.aligned,
+              timingMode: word.timingMode,
+              editable: word.editable,
+              confidence: word.confidence,
               startTime: word.startTime,
               endTime: word.endTime,
               segmentStartTime: segment.startTime,
@@ -173,41 +218,117 @@ export default function TranscriptPanel({
     const range = nativeSelection.getRangeAt(0);
     if (!root.contains(range.commonAncestorContainer)) return null;
 
-    const selectedWords = Array.from(root.querySelectorAll<HTMLElement>("[data-word-id]"))
-      .filter((element) => {
-        try {
-          return range.intersectsNode(element);
-        } catch {
-          return false;
-        }
-      })
+    const allWords = Array.from(root.querySelectorAll<HTMLElement>("[data-word-id]"))
       .map((element) => ({
+        element,
         wordId: element.dataset.wordId || "",
         sourceClipId: element.dataset.sourceClipId || "",
         segmentId: element.dataset.segmentId || "",
         orderIndex: Number(element.dataset.orderIndex ?? -1),
         aligned: element.dataset.aligned === "true",
+        editable: element.dataset.editable === "true",
         startTime: element.dataset.startTime ? Number(element.dataset.startTime) : undefined,
         endTime: element.dataset.endTime ? Number(element.dataset.endTime) : undefined,
         segmentStartTime: Number(element.dataset.segmentStartTime ?? 0),
         segmentEndTime: Number(element.dataset.segmentEndTime ?? 0),
+        isSelected: (() => {
+          try {
+            return range.intersectsNode(element);
+          } catch {
+            return false;
+          }
+        })(),
       }))
       .filter((word) => word.wordId && word.sourceClipId)
       .sort((left, right) => left.orderIndex - right.orderIndex);
+
+    let selectedWords = allWords.filter((word) => word.isSelected);
+
+    while (selectedWords.length > 0) {
+      const firstSelected = selectedWords[0];
+      const firstRange = document.createRange();
+      firstRange.selectNodeContents(firstSelected.element);
+
+      if (
+        isSameBoundary(
+          range.startContainer,
+          range.startOffset,
+          firstRange.endContainer,
+          firstRange.endOffset
+        )
+      ) {
+        selectedWords = selectedWords.slice(1);
+        continue;
+      }
+      break;
+    }
+
+    while (selectedWords.length > 0) {
+      const lastSelected = selectedWords[selectedWords.length - 1];
+      const lastRange = document.createRange();
+      lastRange.selectNodeContents(lastSelected.element);
+
+      if (
+        isSameBoundary(
+          range.endContainer,
+          range.endOffset,
+          lastRange.startContainer,
+          lastRange.startOffset
+        )
+      ) {
+        selectedWords = selectedWords.slice(0, -1);
+        continue;
+      }
+      break;
+    }
 
     if (selectedWords.length === 0) return null;
 
     const firstWord = selectedWords[0];
     const lastWord = selectedWords[selectedWords.length - 1];
-    const hasUnalignedWords = selectedWords.some((word) => !word.aligned);
+    const hasUnalignedWords = selectedWords.some((word) => !word.editable);
     const firstTimedWord = selectedWords.find((word) => Number.isFinite(word.startTime));
     const lastTimedWord = [...selectedWords].reverse().find((word) => Number.isFinite(word.endTime));
+    const firstSelectedIndex = allWords.findIndex((word) => word.wordId === firstWord.wordId);
+    const lastSelectedIndex = allWords.findIndex((word) => word.wordId === lastWord.wordId);
+    const previousTimedWord = firstSelectedIndex <= 0
+      ? null
+      : [...allWords.slice(0, firstSelectedIndex)]
+          .reverse()
+          .find((word) => word.editable && isFiniteNumber(word.endTime)) || null;
+    const nextTimedWord = lastSelectedIndex === -1
+      ? null
+      : allWords
+          .slice(lastSelectedIndex + 1)
+          .find((word) => word.editable && isFiniteNumber(word.startTime)) || null;
+
+    let selectionStart = firstTimedWord?.startTime ?? firstWord.segmentStartTime;
+    let selectionEnd = lastTimedWord?.endTime ?? lastWord.segmentEndTime;
+
+    if (firstTimedWord && previousTimedWord && isFiniteNumber(previousTimedWord.endTime)) {
+      const candidateStart = midpoint(previousTimedWord.endTime, firstTimedWord.startTime);
+      if (candidateStart >= previousTimedWord.endTime && candidateStart <= firstTimedWord.startTime) {
+        selectionStart = candidateStart;
+      }
+    }
+
+    if (lastTimedWord && nextTimedWord && isFiniteNumber(nextTimedWord.startTime)) {
+      const candidateEnd = midpoint(lastTimedWord.endTime, nextTimedWord.startTime);
+      if (candidateEnd >= lastTimedWord.endTime && candidateEnd <= nextTimedWord.startTime) {
+        selectionEnd = candidateEnd;
+      }
+    }
+
+    if (selectionEnd <= selectionStart) {
+      selectionStart = firstTimedWord?.startTime ?? firstWord.segmentStartTime;
+      selectionEnd = lastTimedWord?.endTime ?? lastWord.segmentEndTime;
+    }
 
     return {
       sourceClipId: firstWord.sourceClipId,
       wordIds: selectedWords.map((word) => word.wordId),
-      startTime: firstTimedWord?.startTime ?? firstWord.segmentStartTime,
-      endTime: lastTimedWord?.endTime ?? lastWord.segmentEndTime,
+      startTime: selectionStart,
+      endTime: selectionEnd,
       wordCount: selectedWords.length,
       hasUnalignedWords,
     };
@@ -245,6 +366,16 @@ export default function TranscriptPanel({
     });
   }, [selection]);
 
+  const resolvedManualWordDraft = useMemo(() => {
+    if (!manualWordDraft) return null;
+
+    const stillExists = segments.some((segment) =>
+      segment.words.some((word) => word.id === manualWordDraft.wordId)
+    );
+
+    return stillExists ? manualWordDraft : null;
+  }, [manualWordDraft, segments]);
+
   const handleWordMouseUp = useCallback(
     (event: React.MouseEvent<HTMLSpanElement>) => {
       const wordElement = getWordElement(event.target);
@@ -260,10 +391,52 @@ export default function TranscriptPanel({
       });
 
       onSelectionChange(null);
-      onSeek(Number(wordElement.dataset.startTime ?? wordElement.dataset.segmentStartTime ?? 0));
+      const seekTime = Number(wordElement.dataset.startTime ?? wordElement.dataset.segmentStartTime ?? 0);
+      const timingMode = (wordElement.dataset.timingMode as TranscriptTimingMode | undefined) || "approximate";
+      onSeek(seekTime);
+
+      if (timingMode === "approximate" || timingMode === "manual") {
+        const startTime = Number(wordElement.dataset.startTime ?? wordElement.dataset.segmentStartTime ?? 0);
+        const endTime = Number(wordElement.dataset.endTime ?? wordElement.dataset.segmentEndTime ?? startTime);
+        setManualWordDraft({
+          wordId: wordElement.dataset.wordId || "",
+          text: wordElement.dataset.wordText || "",
+          timingMode,
+          startTime,
+          endTime,
+        });
+        return;
+      }
+
+      setManualWordDraft(null);
     },
     [onSeek, onSelectionChange]
   );
+
+  const hasManualWords = useMemo(
+    () => segments.some((segment) => segment.words.some((word) => word.timingMode === "manual")),
+    [segments]
+  );
+
+  const handleSaveManualTiming = useCallback(async () => {
+    if (!resolvedManualWordDraft || !onSaveManualTiming) return;
+    if (resolvedManualWordDraft.endTime <= resolvedManualWordDraft.startTime) return;
+
+    await onSaveManualTiming({
+      wordId: resolvedManualWordDraft.wordId,
+      startTime: resolvedManualWordDraft.startTime,
+      endTime: resolvedManualWordDraft.endTime,
+    });
+
+    setManualWordDraft((current) =>
+      current
+        ? {
+            ...current,
+            timingMode: "manual",
+          }
+        : current
+    );
+  }, [onSaveManualTiming, resolvedManualWordDraft]);
 
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
@@ -275,13 +448,46 @@ export default function TranscriptPanel({
           </div>
           <button
             type="button"
-            onClick={onRetranscribe}
+            onClick={() => onRetranscribe?.()}
             disabled={!canRetranscribe || isRetranscribing}
             className="shrink-0 rounded-md border border-sky-400/20 bg-sky-400/10 px-2.5 py-1.5 text-[11px] font-medium text-sky-100 transition hover:bg-sky-400/16 disabled:cursor-not-allowed disabled:opacity-35"
           >
             {isRetranscribing ? "Transcribing..." : "Re-Transcribe"}
           </button>
         </div>
+
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <input
+            type="text"
+            value={languageOverride}
+            onChange={(event) => onLanguageOverrideChange(event.target.value)}
+            placeholder={metadata?.language ? `Lock language (detected: ${metadata.language})` : "Lock language (e.g. en)"}
+            className="min-w-[180px] flex-1 rounded-md border border-white/10 bg-white/[0.05] px-3 py-2 text-xs text-white placeholder:text-white/28 focus:border-sky-400/40 focus:outline-none"
+          />
+          {hasManualWords && (
+            <button
+              type="button"
+              onClick={() => onRetranscribe?.({ discardManualCorrections: true })}
+              disabled={!canRetranscribe || isRetranscribing}
+              className="shrink-0 rounded-md border border-amber-400/20 bg-amber-500/10 px-2.5 py-2 text-[11px] font-medium text-amber-100 transition hover:bg-amber-500/16 disabled:cursor-not-allowed disabled:opacity-35"
+            >
+              Re-Transcribe Fresh
+            </button>
+          )}
+        </div>
+
+        {metadata?.lowConfidenceLanguage && (
+          <p className="mt-2 text-[11px] leading-5 text-amber-200/90">
+            Language detection looked uncertain. Re-transcribe with a locked language code for better word coverage and timing.
+          </p>
+        )}
+
+        {metadata && (
+          <p className="mt-2 text-[11px] leading-5 text-white/34">
+            {metadata.language ? `Detected ${metadata.language}` : "Language auto-detect"} ·{" "}
+            {metadata.alignmentMode || "word alignment"} · {metadata.model || metadata.provider || "local transcription"}
+          </p>
+        )}
       </div>
 
       {activeSearchQuery && (
@@ -313,17 +519,67 @@ export default function TranscriptPanel({
         {selection && (
           <p className={`mt-2 text-[11px] leading-5 ${selection.hasUnalignedWords ? "text-amber-300/90" : "text-white/42"}`}>
             {selection.hasUnalignedWords
-              ? "This highlight includes a batch-only region. Use the segment remove action for that section."
+              ? "This highlight includes approximate word timing. Fix the timing or use the segment remove action for that section."
               : `${selection.wordCount} word${selection.wordCount === 1 ? "" : "s"} selected.`}
           </p>
         )}
 
         {!selection && hasBatchOnlyRegions && (
           <p className="mt-2 text-[11px] leading-5 text-white/34">
-            Some regions do not have aligned word timing yet and can only be removed by segment. Re-transcribe the clip to refresh exact word alignment.
+            Some regions still use approximate timing and are not safe for destructive word edits until they are re-transcribed or manually corrected.
           </p>
         )}
       </div>
+
+      {resolvedManualWordDraft && (
+        <div className="border-b border-white/8 px-4 py-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-[10px] uppercase tracking-[0.18em] text-white/30">Word Timing</p>
+              <p className="mt-1 text-xs leading-5 text-white/58">
+                {resolvedManualWordDraft.timingMode === "approximate"
+                  ? `\"${resolvedManualWordDraft.text}\" is approximate. Set exact boundaries from the playhead to make it safe for word-level edits.`
+                  : `\"${resolvedManualWordDraft.text}\" has a manual timing override.`}
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() =>
+                  setManualWordDraft((current) => (current ? { ...current, startTime: currentTime } : current))
+                }
+                className="rounded-md border border-white/10 bg-white/[0.04] px-2.5 py-1.5 text-[11px] font-medium text-white/70 transition hover:bg-white/[0.08] hover:text-white/88"
+              >
+                Set Start Here
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  setManualWordDraft((current) => (current ? { ...current, endTime: currentTime } : current))
+                }
+                className="rounded-md border border-white/10 bg-white/[0.04] px-2.5 py-1.5 text-[11px] font-medium text-white/70 transition hover:bg-white/[0.08] hover:text-white/88"
+              >
+                Set End Here
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleSaveManualTiming()}
+                disabled={
+                  !onSaveManualTiming ||
+                  isSavingManualTiming ||
+                  resolvedManualWordDraft.endTime <= resolvedManualWordDraft.startTime
+                }
+                className="rounded-md border border-emerald-400/20 bg-emerald-500/10 px-2.5 py-1.5 text-[11px] font-medium text-emerald-100 transition hover:bg-emerald-500/16 disabled:cursor-not-allowed disabled:opacity-35"
+              >
+                {isSavingManualTiming ? "Saving..." : "Save Timing"}
+              </button>
+            </div>
+          </div>
+          <p className="mt-2 text-[11px] leading-5 text-white/42">
+            {formatTime(resolvedManualWordDraft.startTime)} - {formatTime(resolvedManualWordDraft.endTime)}
+          </p>
+        </div>
+      )}
 
       {pauses.length > 0 && (
         <div className="border-b border-white/8 px-4 py-3">
@@ -452,14 +708,43 @@ export default function TranscriptPanel({
                           data-segment-id={word.segmentId}
                           data-order-index={word.orderIndex}
                           data-aligned={word.aligned ? "true" : "false"}
+                          data-editable={word.editable ? "true" : "false"}
+                          data-timing-mode={word.timingMode}
+                          data-word-text={word.text}
                           data-start-time={word.startTime !== undefined ? String(word.startTime) : ""}
                           data-end-time={word.endTime !== undefined ? String(word.endTime) : ""}
                           data-segment-start-time={String(word.segmentStartTime)}
                           data-segment-end-time={String(word.segmentEndTime)}
                           data-selected={isSelected ? "true" : "false"}
+                          title={
+                            word.timingMode === "approximate"
+                              ? "Approximate timing. Use manual timing to make this word edit-safe."
+                              : word.timingMode === "manual"
+                              ? "Manual timing override."
+                              : undefined
+                          }
                           onMouseUp={handleWordMouseUp}
+                          onDoubleClick={() =>
+                            setManualWordDraft({
+                              wordId: word.wordId,
+                              text: word.text,
+                              timingMode: word.timingMode,
+                              startTime: word.startTime ?? word.segmentStartTime,
+                              endTime: word.endTime ?? word.segmentEndTime,
+                            })
+                          }
                         >
-                          {word.text}
+                          <span
+                            className={
+                              word.timingMode === "approximate"
+                                ? "rounded border-b border-dotted border-amber-300/80 bg-amber-400/8 text-amber-100"
+                                : word.timingMode === "manual"
+                                ? "rounded border-b border-dotted border-emerald-300/70 bg-emerald-400/8 text-emerald-50"
+                                : undefined
+                            }
+                          >
+                            {word.text}
+                          </span>
                         </span>
                         {index < words.length - 1 ? " " : ""}
                       </span>

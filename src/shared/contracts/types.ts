@@ -28,6 +28,22 @@ export type EmbeddingStatus =
 
 export type MonitorMode = "source" | "program";
 export type DockTab = "ai" | "transcript" | "inspector" | "font";
+export type TranscriptTimingMode = "exact" | "approximate" | "manual";
+
+export interface TranscriptMetadata {
+  provider?: string | null;
+  model?: string | null;
+  device?: string | null;
+  computeType?: string | null;
+  language?: string | null;
+  languageConfidence?: number | null;
+  alignmentMode?: string | null;
+  languageLocked?: boolean;
+  lowConfidenceLanguage?: boolean;
+  vadOnset?: number | null;
+  vadOffset?: number | null;
+  audioStreamOffset?: number | null;
+}
 
 export interface TranscriptWord {
   id: string;
@@ -38,6 +54,8 @@ export interface TranscriptWord {
   endTime: number;
   confidence?: number;
   aligned: boolean;
+  timingMode: TranscriptTimingMode;
+  editable: boolean;
   startSample?: number;
   endSample?: number;
 }
@@ -48,6 +66,7 @@ export interface TranscriptSegment {
   startTime: number;
   endTime: number;
   text: string;
+  rawText: string;
   words: TranscriptWord[];
   embedding?: number[];
   alignmentSource?: "whisperx" | "gemini" | "local" | string;
@@ -82,6 +101,7 @@ export interface MediaAsset {
   transcriptStatus: TranscriptStatus;
   embeddingStatus: EmbeddingStatus;
   transcriptSegments: TranscriptSegment[];
+  transcriptMetadata?: TranscriptMetadata | null;
   pauseRanges: PauseRange[];
   embeddingsReady: boolean;
   waveform: number[];

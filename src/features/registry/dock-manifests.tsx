@@ -9,6 +9,7 @@ import type {
   PauseRange,
   SearchHit,
   SequenceItem,
+  TranscriptMetadata,
   TranscriptSelection,
 } from "@/shared/contracts";
 
@@ -31,15 +32,20 @@ interface DockContext {
   transcript: {
     clipName?: string;
     segments: LibraryClip["transcriptSegments"];
+    metadata?: TranscriptMetadata | null;
     pauses: PauseRange[];
     currentTime: number;
     canRetranscribe?: boolean;
     isRetranscribing?: boolean;
+    languageOverride: string;
     selection: TranscriptSelection | null;
     activeRange?: { startTime: number; endTime: number } | null;
     timelineSourceRanges: Array<{ startTime: number; endTime: number }>;
+    isSavingManualTiming?: boolean;
     onSeek: (time: number) => void;
-    onRetranscribe?: () => void;
+    onRetranscribe?: (options?: { discardManualCorrections?: boolean }) => void;
+    onLanguageOverrideChange: (value: string) => void;
+    onSaveManualTiming?: (input: { wordId: string; startTime: number; endTime: number }) => Promise<void>;
     onSelectionChange: (selection: TranscriptSelection | null) => void;
     onRemoveSelection: () => void;
     onRemoveSegment: (segmentId: string) => void;
@@ -198,15 +204,20 @@ export const dockFeatureManifests: DockFeatureManifest[] = [
       <TranscriptPanel
         clipName={transcript.clipName}
         segments={transcript.segments}
+        metadata={transcript.metadata}
         pauses={transcript.pauses}
         currentTime={transcript.currentTime}
         canRetranscribe={transcript.canRetranscribe}
         isRetranscribing={transcript.isRetranscribing}
+        languageOverride={transcript.languageOverride}
         selection={transcript.selection}
         activeRange={transcript.activeRange}
         timelineSourceRanges={transcript.timelineSourceRanges}
+        isSavingManualTiming={transcript.isSavingManualTiming}
         onSeek={transcript.onSeek}
         onRetranscribe={transcript.onRetranscribe}
+        onLanguageOverrideChange={transcript.onLanguageOverrideChange}
+        onSaveManualTiming={transcript.onSaveManualTiming}
         onSelectionChange={transcript.onSelectionChange}
         onRemoveSelection={transcript.onRemoveSelection}
         onRemoveSegment={transcript.onRemoveSegment}

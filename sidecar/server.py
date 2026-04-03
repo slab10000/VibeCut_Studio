@@ -4,6 +4,7 @@ import concurrent.futures
 import inspect
 import importlib.util
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -14,6 +15,8 @@ from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 
+from .audio_engine import AudioEngine
+
 APP_TITLE = "VibeCut Studio WhisperX Sidecar"
 AUDIO_SAMPLE_RATE = 16000
 WHISPERX_MODEL = os.getenv("WHISPERX_MODEL", "large-v3")
@@ -21,9 +24,10 @@ WHISPERX_DEVICE = os.getenv("WHISPERX_DEVICE", "cpu")
 WHISPERX_COMPUTE_TYPE = os.getenv("WHISPERX_COMPUTE_TYPE", "int8")
 WHISPERX_BATCH_SIZE = int(os.getenv("WHISPERX_BATCH_SIZE", "16"))
 # VAD (Voice Activity Detection) — filters out non-speech before transcription.
-# Lower values = less aggressive filtering (0.3/0.2 works better for varied audio).
-WHISPERX_VAD_ONSET = float(os.getenv("WHISPERX_VAD_ONSET", "0.300"))
-WHISPERX_VAD_OFFSET = float(os.getenv("WHISPERX_VAD_OFFSET", "0.200"))
+# Lower values = less aggressive filtering. The max-fidelity profile keeps
+# short/filler words whenever possible and accepts the extra cleanup cost.
+WHISPERX_VAD_ONSET = float(os.getenv("WHISPERX_VAD_ONSET", "0.200"))
+WHISPERX_VAD_OFFSET = float(os.getenv("WHISPERX_VAD_OFFSET", "0.100"))
 # Minimum language detection confidence to flag low-confidence auto-detection
 # in the response metadata. We still attempt alignment and fall back only if
 # the aligner actually fails.
@@ -43,6 +47,7 @@ app = FastAPI(title=APP_TITLE, version="0.1.0")
 _model_lock = threading.Lock()
 _transcribe_model: dict[str, Any] = {"key": None, "value": None}
 _align_models: dict[tuple[str, str], tuple[Any, Any]] = {}
+WORD_EDGE_PUNCTUATION = re.compile(r"(^[^\w']+|[^\w']+$)")
 
 
 def whisperx_available() -> bool:
@@ -332,9 +337,104 @@ def normalize_aligned_word(word: dict[str, Any]) -> dict[str, Any] | None:
         "endTime": end_time,
         "confidence": confidence,
         "aligned": True,
+        "timingMode": "exact",
+        "editable": True,
         "startSample": int(round(start_time * AUDIO_SAMPLE_RATE)),
         "endSample": int(round(end_time * AUDIO_SAMPLE_RATE)),
     }
+
+
+def normalize_match_token(text: str) -> str:
+    return WORD_EDGE_PUNCTUATION.sub("", text.strip().lower())
+
+
+def token_weight(text: str) -> int:
+    return max(len(normalize_match_token(text)) or len(text.strip()), 1)
+
+
+def interpolate_display_words(display_words: list[dict[str, Any]], segment_start: float, segment_end: float) -> list[dict[str, Any]]:
+    if not display_words:
+        return display_words
+
+    index = 0
+    while index < len(display_words):
+        if display_words[index]["timingMode"] != "approximate":
+            index += 1
+            continue
+
+        run_start = index
+        while index < len(display_words) and display_words[index]["timingMode"] == "approximate":
+            index += 1
+        run_end = index - 1
+
+        previous_exact = display_words[run_start - 1] if run_start > 0 else None
+        next_exact = display_words[run_end + 1] if run_end + 1 < len(display_words) else None
+
+        left_boundary = previous_exact["endTime"] if previous_exact else segment_start
+        right_boundary = next_exact["startTime"] if next_exact else segment_end
+
+        if right_boundary <= left_boundary:
+            left_boundary = previous_exact["startTime"] if previous_exact else segment_start
+            right_boundary = next_exact["endTime"] if next_exact else segment_end
+
+        if right_boundary <= left_boundary:
+            right_boundary = left_boundary + max(0.02 * (run_end - run_start + 1), 0.02)
+
+        weights = [token_weight(display_words[word_index]["text"]) for word_index in range(run_start, run_end + 1)]
+        total_weight = sum(weights) or len(weights)
+        cursor = left_boundary
+
+        for offset, word_index in enumerate(range(run_start, run_end + 1)):
+            word = display_words[word_index]
+            duration = (right_boundary - left_boundary) * (weights[offset] / total_weight)
+            next_cursor = right_boundary if word_index == run_end else cursor + duration
+            word["startTime"] = cursor
+            word["endTime"] = max(next_cursor, cursor + 0.01)
+            word["startSample"] = int(round(word["startTime"] * AUDIO_SAMPLE_RATE))
+            word["endSample"] = int(round(word["endTime"] * AUDIO_SAMPLE_RATE))
+            cursor = word["endTime"]
+
+    return display_words
+
+
+def reconcile_display_words(text: str, aligned_words: list[dict[str, Any]], segment_start: float, segment_end: float) -> list[dict[str, Any]]:
+    raw_tokens = [token for token in text.split() if token.strip()]
+    exact_words = sorted(aligned_words, key=lambda word: (word["startTime"], word["endTime"]))
+    display_words: list[dict[str, Any]] = []
+    exact_index = 0
+
+    for token in raw_tokens:
+        normalized_token = normalize_match_token(token)
+        matched_word = None
+        if exact_index < len(exact_words):
+            candidate = exact_words[exact_index]
+            if normalize_match_token(candidate["text"]) == normalized_token:
+                matched_word = dict(candidate)
+                exact_index += 1
+
+        if matched_word is not None:
+            display_words.append(matched_word)
+            continue
+
+        display_words.append(
+            {
+                "id": str(uuid.uuid4()),
+                "text": token,
+                "startTime": segment_start,
+                "endTime": segment_end,
+                "confidence": None,
+                "aligned": False,
+                "timingMode": "approximate",
+                "editable": False,
+                "startSample": int(round(segment_start * AUDIO_SAMPLE_RATE)),
+                "endSample": int(round(segment_end * AUDIO_SAMPLE_RATE)),
+            }
+        )
+
+    for leftover in exact_words[exact_index:]:
+        display_words.append(dict(leftover))
+
+    return interpolate_display_words(display_words, segment_start, segment_end)
 
 
 def build_segment_payloads(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -356,6 +456,7 @@ def build_segment_payloads(segments: list[dict[str, Any]]) -> list[dict[str, Any
             if normalized_word
         ]
         words.sort(key=lambda word: (word["startTime"], word["endTime"]))
+        display_words = reconcile_display_words(text, words, start_time, end_time)
 
         normalized_segments.append(
             {
@@ -363,7 +464,10 @@ def build_segment_payloads(segments: list[dict[str, Any]]) -> list[dict[str, Any
                 "startTime": start_time,
                 "endTime": end_time,
                 "text": text,
-                "words": words,
+                "rawText": text,
+                "alignedWords": words,
+                "displayWords": display_words,
+                "words": display_words,
             }
         )
 
@@ -428,9 +532,22 @@ async def transcribe(
             source_media_path = input_path
 
         extract_audio(source_media_path, audio_path)
-        pauses = detect_pause_ranges(audio_path)
 
         audio = whisperx.load_audio(str(audio_path))
+
+        # ── Audio engine: initialise once, reuse across all analysis steps ──
+        engine = AudioEngine(audio, AUDIO_SAMPLE_RATE)
+
+        # Detect AAC encoder delay / container start_time offset so that
+        # WhisperX timestamps align with the HTML5 video timeline and the
+        # FFmpeg trim boundaries used at export time.
+        stream_offset = engine.detect_stream_offset(source_media_path)
+
+        # Pause detection reuses the already-loaded audio array — no extra
+        # subprocess needed and the 5 ms frame resolution is more precise
+        # than the FFmpeg silencedetect output.
+        pauses = engine.detect_pauses(min_duration=SILENCE_MIN_DURATION)
+
         model = get_transcribe_model(whisperx)
 
         transcribe_kwargs: dict[str, Any] = {
@@ -484,7 +601,19 @@ async def transcribe(
                 for segment in transcription_segments
             ]
 
-        if not language and language_code and lang_confidence < WHISPERX_LANG_CONFIDENCE_MIN:
+        # ── Snap word boundaries to silence gaps ────────────────────────────
+        # This replaces wav2vec2 alignment's approximate end/start times with
+        # the lowest-energy frame in each inter-word gap — ensuring every cut
+        # lands in natural silence rather than mid-phoneme.
+        aligned_segments = engine.refine_all_segments(aligned_segments)
+
+        # ── Apply stream offset so timestamps match the video timeline ──────
+        aligned_segments, pauses = engine.apply_offset(aligned_segments, pauses, stream_offset)
+
+        low_confidence_language = bool(
+            not language and language_code and lang_confidence < WHISPERX_LANG_CONFIDENCE_MIN
+        )
+        if low_confidence_language:
             alignment_mode = f"{alignment_mode}-low-confidence-language"
 
         segments = build_segment_payloads(aligned_segments)
@@ -509,6 +638,9 @@ async def transcribe(
                 "language": language_code,
                 "languageConfidence": lang_confidence,
                 "alignmentMode": alignment_mode,
+                "languageLocked": bool(language),
+                "lowConfidenceLanguage": low_confidence_language,
+                "audioStreamOffset": stream_offset,
                 "vadOnset": WHISPERX_VAD_ONSET,
                 "vadOffset": WHISPERX_VAD_OFFSET,
             },

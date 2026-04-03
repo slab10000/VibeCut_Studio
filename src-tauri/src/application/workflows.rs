@@ -26,10 +26,12 @@ use crate::{
     models::{
         AiFontResponse, AiImageResponse, AiStyleSuggestion, AiVideoResponse, AppCapabilities, DesktopBootstrap,
         EditCommandResponse, JobRecord, MediaAsset, PauseRange, ProjectSnapshot, ProjectSummary, SearchHit,
-        SequenceItem, TimelinePatchRequest, TranscriptResponse, TranscriptSegment, TranscriptWord,
+        SequenceItem, TimelinePatchRequest, TranscriptMetadata, TranscriptResponse, TranscriptSegment, TranscriptWord,
     },
     state::AppState,
 };
+
+const AUDIO_SAMPLE_RATE: f64 = 16_000.0;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -85,6 +87,7 @@ fn build_media_asset(path: &Path) -> anyhow::Result<MediaAsset> {
         transcript_status: "not_requested".to_string(),
         embedding_status: "not_requested".to_string(),
         transcript_segments: Vec::new(),
+        transcript_metadata: None,
         pause_ranges: Vec::new(),
         embeddings_ready: false,
         waveform: extract_waveform(path, 256),
@@ -128,7 +131,35 @@ fn spawn_thumbnail_generation(app: AppHandle, state: AppState, project_id: Strin
     });
 }
 
-fn parse_transcription_payload(asset: &MediaAsset, payload: Value) -> (Vec<TranscriptSegment>, Vec<PauseRange>) {
+fn normalize_word_token(text: &str) -> String {
+    text.trim_matches(|character: char| !character.is_alphanumeric() && character != '\'')
+        .to_lowercase()
+}
+
+fn word_sample(time: f64) -> i64 {
+    (time * AUDIO_SAMPLE_RATE).round() as i64
+}
+
+fn parse_transcript_metadata(payload: &Value) -> Option<TranscriptMetadata> {
+    let metadata = payload.get("metadata")?;
+    Some(TranscriptMetadata {
+        provider: metadata["provider"].as_str().map(ToOwned::to_owned),
+        model: metadata["model"].as_str().map(ToOwned::to_owned),
+        device: metadata["device"].as_str().map(ToOwned::to_owned),
+        compute_type: metadata["computeType"].as_str().map(ToOwned::to_owned),
+        language: metadata["language"].as_str().map(ToOwned::to_owned),
+        language_confidence: metadata["languageConfidence"].as_f64(),
+        alignment_mode: metadata["alignmentMode"].as_str().map(ToOwned::to_owned),
+        language_locked: metadata["languageLocked"].as_bool(),
+        low_confidence_language: metadata["lowConfidenceLanguage"].as_bool(),
+        vad_onset: metadata["vadOnset"].as_f64(),
+        vad_offset: metadata["vadOffset"].as_f64(),
+        audio_stream_offset: metadata["audioStreamOffset"].as_f64(),
+    })
+}
+
+fn parse_transcription_payload(asset: &MediaAsset, payload: Value) -> (Vec<TranscriptSegment>, Vec<PauseRange>, Option<TranscriptMetadata>) {
+    let transcript_metadata = parse_transcript_metadata(&payload);
     let segments = payload["segments"]
         .as_array()
         .cloned()
@@ -139,12 +170,40 @@ fn parse_transcription_payload(asset: &MediaAsset, payload: Value) -> (Vec<Trans
             let start_time = segment["startTime"].as_f64().or_else(|| segment["start"].as_f64())?;
             let end_time = segment["endTime"].as_f64().or_else(|| segment["end"].as_f64())?;
             let text = segment["text"].as_str()?.to_string();
-            let words = segment["words"]
+            let raw_text = segment["rawText"]
+                .as_str()
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| text.clone());
+            let words = segment["displayWords"]
                 .as_array()
+                .or_else(|| segment["words"].as_array())
                 .cloned()
                 .unwrap_or_default()
                 .into_iter()
                 .filter_map(|word| {
+                    let text = word["text"]
+                        .as_str()
+                        .or_else(|| word["word"].as_str())
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string();
+                    if text.is_empty() {
+                        return None;
+                    }
+
+                    let timing_mode = word["timingMode"]
+                        .as_str()
+                        .map(ToOwned::to_owned)
+                        .unwrap_or_else(|| {
+                            if word["aligned"].as_bool().unwrap_or(true) {
+                                "exact".to_string()
+                            } else {
+                                "approximate".to_string()
+                            }
+                        });
+                    let editable = word["editable"].as_bool().unwrap_or(timing_mode != "approximate");
+                    let start_time = word["startTime"].as_f64().or_else(|| word["start"].as_f64()).unwrap_or(start_time);
+                    let end_time = word["endTime"].as_f64().or_else(|| word["end"].as_f64()).unwrap_or(end_time);
                     let word_id = word["id"]
                         .as_str()
                         .map(ToOwned::to_owned)
@@ -154,17 +213,15 @@ fn parse_transcription_payload(asset: &MediaAsset, payload: Value) -> (Vec<Trans
                         id: word_id,
                         source_clip_id: asset.id.clone(),
                         segment_id: id.clone(),
-                        text: word["text"]
-                            .as_str()
-                            .or_else(|| word["word"].as_str())
-                            .unwrap_or_default()
-                            .to_string(),
-                        start_time: word["startTime"].as_f64().or_else(|| word["start"].as_f64()).unwrap_or(start_time),
-                        end_time: word["endTime"].as_f64().or_else(|| word["end"].as_f64()).unwrap_or(end_time),
+                        text,
+                        start_time,
+                        end_time,
                         confidence: word["confidence"].as_f64().or_else(|| word["score"].as_f64()),
-                        aligned: word["aligned"].as_bool().unwrap_or(true),
-                        start_sample: word["startSample"].as_i64(),
-                        end_sample: word["endSample"].as_i64(),
+                        aligned: word["aligned"].as_bool().unwrap_or(timing_mode != "approximate"),
+                        timing_mode,
+                        editable,
+                        start_sample: word["startSample"].as_i64().or_else(|| Some(word_sample(start_time))),
+                        end_sample: word["endSample"].as_i64().or_else(|| Some(word_sample(end_time))),
                     })
                 })
                 .collect::<Vec<_>>();
@@ -175,7 +232,8 @@ fn parse_transcription_payload(asset: &MediaAsset, payload: Value) -> (Vec<Trans
                 start_time,
                 end_time,
                 text,
-                word_edit_capable: words.iter().any(|word| word.aligned),
+                raw_text,
+                word_edit_capable: words.iter().any(|word| word.editable),
                 words,
                 alignment_source: payload["metadata"]["provider"].as_str().map(ToOwned::to_owned),
             })
@@ -198,7 +256,74 @@ fn parse_transcription_payload(asset: &MediaAsset, payload: Value) -> (Vec<Trans
         })
         .collect::<Vec<_>>();
 
-    (segments, pauses)
+    (segments, pauses, transcript_metadata)
+}
+
+fn preserve_manual_word_timings(asset: &MediaAsset, segments: &mut [TranscriptSegment]) {
+    let manual_words = asset
+        .transcript_segments
+        .iter()
+        .flat_map(|segment| segment.words.iter())
+        .filter(|word| word.timing_mode == "manual")
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if manual_words.is_empty() {
+        return;
+    }
+
+    let mut cursor = (0usize, 0usize);
+
+    for manual_word in manual_words {
+        let manual_token = normalize_word_token(&manual_word.text);
+        if manual_token.is_empty() {
+            continue;
+        }
+
+        let mut matched = None;
+        for (segment_index, segment) in segments.iter().enumerate().skip(cursor.0) {
+            let start_index = if segment_index == cursor.0 { cursor.1 } else { 0 };
+            for word_index in start_index..segment.words.len() {
+                let candidate = &segment.words[word_index];
+                if normalize_word_token(&candidate.text) == manual_token {
+                    matched = Some((segment_index, word_index));
+                    break;
+                }
+            }
+            if matched.is_some() {
+                break;
+            }
+        }
+
+        let Some((segment_index, word_index)) = matched else {
+            continue;
+        };
+
+        let word = &mut segments[segment_index].words[word_index];
+        word.start_time = manual_word.start_time;
+        word.end_time = manual_word.end_time;
+        word.start_sample = Some(word_sample(manual_word.start_time));
+        word.end_sample = Some(word_sample(manual_word.end_time));
+        word.timing_mode = "manual".to_string();
+        word.editable = true;
+        word.aligned = true;
+        if manual_word.confidence.is_some() {
+            word.confidence = manual_word.confidence;
+        }
+        segments[segment_index].word_edit_capable = true;
+
+        cursor = (segment_index, word_index + 1);
+    }
+}
+
+fn apply_transcription_payload(asset: &mut MediaAsset, payload: Value, preserve_manual: bool) {
+    let (mut segments, pauses, transcript_metadata) = parse_transcription_payload(asset, payload);
+    if preserve_manual {
+        preserve_manual_word_timings(asset, &mut segments);
+    }
+    asset.transcript_segments = segments;
+    asset.transcript_metadata = transcript_metadata;
+    asset.pause_ranges = pauses;
 }
 
 pub async fn get_capabilities(state: &AppState) -> Result<AppCapabilities, String> {
@@ -251,6 +376,69 @@ pub fn get_transcript(state: &AppState, asset_id: String) -> Result<MediaAsset, 
         .load_media_asset(&asset_id)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "Media asset not found".to_string())
+}
+
+pub fn update_transcript_word_timing(
+    app: &AppHandle,
+    state: &AppState,
+    asset_id: String,
+    word_id: String,
+    start_time: f64,
+    end_time: f64,
+) -> Result<MediaAsset, String> {
+    if !start_time.is_finite() || !end_time.is_finite() {
+        return Err("Manual timing must be finite.".to_string());
+    }
+    if end_time <= start_time {
+        return Err("Manual timing end must be after the start.".to_string());
+    }
+
+    let project = state.database.load_project_summary().map_err(|error| error.to_string())?;
+    let mut asset = state
+        .database
+        .load_media_asset(&asset_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Media asset not found".to_string())?;
+
+    if asset.duration > 0.0 && end_time > asset.duration + 0.001 {
+        return Err("Manual timing cannot exceed the source clip duration.".to_string());
+    }
+
+    let mut updated = false;
+    for segment in &mut asset.transcript_segments {
+        for word in &mut segment.words {
+            if word.id != word_id {
+                continue;
+            }
+
+            word.start_time = start_time;
+            word.end_time = end_time;
+            word.start_sample = Some(word_sample(start_time));
+            word.end_sample = Some(word_sample(end_time));
+            word.timing_mode = "manual".to_string();
+            word.editable = true;
+            word.aligned = true;
+            segment.word_edit_capable = true;
+            updated = true;
+            break;
+        }
+        if updated {
+            break;
+        }
+    }
+
+    if !updated {
+        return Err("Transcript word not found.".to_string());
+    }
+
+    state
+        .database
+        .upsert_media_assets(&project.project_id, &[asset.clone()])
+        .map_err(|error| error.to_string())?;
+    emit_entity_change(app, "transcript", Some(asset.id.clone()), "updated")?;
+    emit_entity_change(app, "library", Some(asset.id.clone()), "updated")?;
+
+    Ok(asset)
 }
 
 pub fn list_jobs(state: &AppState) -> Result<Vec<JobRecord>, String> {
@@ -362,6 +550,8 @@ pub async fn transcript_run_direct(
     app: &AppHandle,
     state: &AppState,
     asset_id: String,
+    language: Option<String>,
+    discard_manual_corrections: bool,
 ) -> Result<TranscriptResponse, String> {
     let project = state.database.load_project_summary().map_err(|error| error.to_string())?;
     let mut asset = state
@@ -374,17 +564,18 @@ pub async fn transcript_run_direct(
         "transcript",
         Some("library"),
         &asset_id,
-        Some(json!({ "assetId": asset_id.clone() })),
+        Some(json!({
+            "assetId": asset_id.clone(),
+            "language": language.clone(),
+            "discardManualCorrections": discard_manual_corrections,
+        })),
         None,
     );
     let running_job = mark_job_running(&job, 0.1, Some("Uploading media to transcription provider".to_string()));
     emit_job_update(app, &state.database, &running_job)?;
 
-    let payload = request_transcription(asset.source_path.clone(), asset.file_name.clone()).await?;
-    let (segments, pauses) = parse_transcription_payload(&asset, payload);
-
-    asset.transcript_segments = segments;
-    asset.pause_ranges = pauses;
+    let payload = request_transcription(asset.source_path.clone(), asset.file_name.clone(), language.clone()).await?;
+    apply_transcription_payload(&mut asset, payload, !discard_manual_corrections);
     asset.status = "alignment_ready".to_string();
     asset.transcript_status = "alignment_ready".to_string();
     asset.error = None;
@@ -408,7 +599,11 @@ pub async fn transcript_run_direct(
     let complete_job = mark_job_complete(
         &running_job,
         Some("Transcript and alignment ready".to_string()),
-        Some(json!({ "assetId": asset.id.clone() })),
+        Some(json!({
+            "assetId": asset.id.clone(),
+            "language": language.clone(),
+            "discardManualCorrections": discard_manual_corrections,
+        })),
     );
     emit_job_update(app, &state.database, &complete_job)?;
 
@@ -418,7 +613,13 @@ pub async fn transcript_run_direct(
     })
 }
 
-pub fn enqueue_transcript(app: AppHandle, state: AppState, asset_id: String) -> Result<JobRecord, String> {
+pub fn enqueue_transcript(
+    app: AppHandle,
+    state: AppState,
+    asset_id: String,
+    language: Option<String>,
+    discard_manual_corrections: bool,
+) -> Result<JobRecord, String> {
     if let Some(job) = state
         .database
         .find_active_job("transcript", &asset_id)
@@ -441,7 +642,11 @@ pub fn enqueue_transcript(app: AppHandle, state: AppState, asset_id: String) -> 
         "transcript",
         Some("library"),
         &asset_id,
-        Some(json!({ "assetId": asset_id.clone() })),
+        Some(json!({
+            "assetId": asset_id.clone(),
+            "language": language.clone(),
+            "discardManualCorrections": discard_manual_corrections,
+        })),
         None,
     );
     emit_job_update(&app, &state.database, &initial_job)?;
@@ -460,11 +665,8 @@ pub fn enqueue_transcript(app: AppHandle, state: AppState, asset_id: String) -> 
                 .map_err(|error| error.to_string())?
                 .ok_or_else(|| "Media asset not found".to_string())?;
 
-            let payload = request_transcription(asset.source_path.clone(), asset.file_name.clone()).await?;
-            let (segments, pauses) = parse_transcription_payload(&asset, payload);
-
-            asset.transcript_segments = segments;
-            asset.pause_ranges = pauses;
+            let payload = request_transcription(asset.source_path.clone(), asset.file_name.clone(), language.clone()).await?;
+            apply_transcription_payload(&mut asset, payload, !discard_manual_corrections);
             asset.status = "alignment_ready".to_string();
             asset.transcript_status = "alignment_ready".to_string();
             asset.error = None;
@@ -494,7 +696,11 @@ pub fn enqueue_transcript(app: AppHandle, state: AppState, asset_id: String) -> 
                 let complete_job = mark_job_complete(
                     &running_job,
                     Some("Transcript and alignment ready".to_string()),
-                    Some(json!({ "assetId": asset.id })),
+                    Some(json!({
+                        "assetId": asset.id,
+                        "language": language,
+                        "discardManualCorrections": discard_manual_corrections,
+                    })),
                 );
                 let _ = emit_job_update(&app_handle, &state.database, &complete_job);
             }

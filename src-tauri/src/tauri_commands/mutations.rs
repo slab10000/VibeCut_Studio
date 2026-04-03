@@ -28,3 +28,15 @@ pub fn library_remove(
 ) -> Result<(), String> {
     workflows::remove_library_asset(&app, &state, asset_id)
 }
+
+#[tauri::command]
+pub fn transcript_update_word_timing(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    asset_id: String,
+    word_id: String,
+    start_time: f64,
+    end_time: f64,
+) -> Result<MediaAsset, String> {
+    workflows::update_transcript_word_timing(&app, &state, asset_id, word_id, start_time, end_time)
+}

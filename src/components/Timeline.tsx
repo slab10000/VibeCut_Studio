@@ -27,6 +27,14 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
 }
 
+// Extract the portion of a full-clip waveform that corresponds to [startTime, endTime].
+function sliceWaveform(waveform: number[], startTime: number, endTime: number, sourceDuration: number): number[] {
+  if (waveform.length === 0 || sourceDuration <= 0) return waveform;
+  const startIdx = Math.floor((startTime / sourceDuration) * waveform.length);
+  const endIdx = Math.ceil((endTime / sourceDuration) * waveform.length);
+  return waveform.slice(Math.max(0, startIdx), Math.min(waveform.length, endIdx));
+}
+
 function WaveformSvg({ waveform, isSelected }: { waveform: number[]; isSelected: boolean }) {
   const n = waveform.length;
   if (n === 0) return null;
@@ -573,7 +581,11 @@ export default function Timeline({
                 {clipsWithOffsets.map((clip) => {
                   const widthPercent = totalDuration > 0 ? (clip.duration / totalDuration) * 100 : 0;
                   const leftPercent = totalDuration > 0 ? (clip.sequenceStart / totalDuration) * 100 : 0;
-                  const waveform = clip.source?.waveform || [];
+                  const fullWaveform = clip.source?.waveform || [];
+                  const sourceDuration = clip.source?.duration ?? clip.sourceEndTime;
+                  const waveform = clip.type === "video" && sourceDuration > 0
+                    ? sliceWaveform(fullWaveform, clip.sourceStartTime, clip.sourceEndTime, sourceDuration)
+                    : fullWaveform;
                   const isSelected = clip.id === selectedClipId;
 
                   return (

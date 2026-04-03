@@ -39,8 +39,17 @@ pub async fn transcript_run(
     app: AppHandle,
     state: State<'_, AppState>,
     asset_id: String,
+    language: Option<String>,
+    discard_manual_corrections: Option<bool>,
 ) -> Result<TranscriptResponse, String> {
-    workflows::transcript_run_direct(&app, &state, asset_id).await
+    workflows::transcript_run_direct(
+        &app,
+        &state,
+        asset_id,
+        language,
+        discard_manual_corrections.unwrap_or(false),
+    )
+    .await
 }
 
 #[tauri::command]
